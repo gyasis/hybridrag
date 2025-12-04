@@ -296,8 +296,8 @@ class IngestionPipeline:
                     full_content += "\n\n---\n\n"
                 full_content += chunk['content']
             
-            # Ingest into LightRAG
-            await self.lightrag.ainsert(full_content)
+            # Ingest into LightRAG with source file path for tracking
+            await self.lightrag.ainsert(full_content, file_path=original_path)
             
             logger.info(f"Successfully ingested: {original_path}")
             

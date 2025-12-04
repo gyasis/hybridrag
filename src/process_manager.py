@@ -463,8 +463,8 @@ class ProcessManager:
                                 doc_content += f"# Size: {file_info['size']} bytes\n\n"
                                 doc_content += content
                                 
-                                # Ingest into LightRAG
-                                asyncio.run(lightrag_core.ainsert(doc_content))
+                                # Ingest into LightRAG with source file path
+                                asyncio.run(lightrag_core.ainsert(doc_content, file_path=file_info['path']))
                                 
                                 processed_count += 1
                                 logger.info(f"Successfully processed: {file_info['path']}")

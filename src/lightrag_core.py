@@ -150,20 +150,23 @@ class HybridLightRAGCore:
             self.rag_initialized = True
             logger.info("LightRAG storages and pipeline initialized successfully")
     
-    async def ainsert(self, content: str) -> bool:
+    async def ainsert(self, content: str, file_path: str = None) -> bool:
         """
         Insert content into LightRAG knowledge graph.
-        
+
         Args:
             content: Text content to insert
-            
+            file_path: Source file path for citation/tracking (optional)
+
         Returns:
             True if successful, False otherwise
         """
         try:
             await self._ensure_initialized()
-            await self.rag.ainsert(content)
-            logger.info(f"Successfully inserted content ({len(content)} chars)")
+            # Pass file_paths to LightRAG for proper source tracking
+            await self.rag.ainsert(content, file_paths=file_path)
+            source_info = f" from {file_path}" if file_path else ""
+            logger.info(f"Successfully inserted content ({len(content)} chars){source_info}")
             return True
         except Exception as e:
             logger.error(f"Error inserting content: {e}")
