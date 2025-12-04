@@ -247,6 +247,30 @@ python hybridrag.py ingest --folder ./data --db-action add --metadata "project=m
 
 ---
 
+## 📂 Not Just SpecStory - Regular Folder Ingestion
+
+HybridRAG works with **any folder**, not just `.specstory`:
+
+```bash
+# Ingest any folder directly
+python hybridrag.py ingest --folder /path/to/documents
+
+# Multiple folders at once
+python hybridrag.py ingest --folder ./docs --folder ./notes --db-action add
+
+# With custom metadata
+python hybridrag.py ingest --folder ./research \
+    --metadata "project=research" \
+    --metadata "year=2025"
+```
+
+| Use Case | Approach |
+|----------|----------|
+| `.specstory` folders (Claude Code history) | Use `./scripts/ingest_specstory_folders.sh` |
+| Any other documents (PDFs, markdown, code) | Use `python hybridrag.py ingest --folder` |
+
+---
+
 ## 💡 Pro Tips
 
 - Use `fresh` only for first-time setup
@@ -254,6 +278,7 @@ python hybridrag.py ingest --folder ./data --db-action add --metadata "project=m
 - Watcher checks every 5 minutes by default (300 seconds)
 - All queries use the unified database by default
 - Logs are in `logs/` directory with timestamps
+- **HybridRAG is not limited to `.specstory`** - ingest any documents!
 
 ---
 

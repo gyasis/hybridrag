@@ -252,6 +252,61 @@ python hybridrag.py ingest --folder ./data --db-action fresh --yes --quiet
 
 ---
 
+## 📂 SpecStory Scripts vs Regular Folder Ingestion
+
+HybridRAG can ingest **any folder**, not just `.specstory` folders. Here's when to use each approach:
+
+### SpecStory Scripts (This Guide)
+
+Use the shell scripts when processing **Claude Code / SpecStory conversation history**:
+
+```bash
+# Auto-discovers ALL .specstory folders recursively
+./scripts/ingest_specstory_folders.sh /path/to/projects fresh
+```
+
+**Benefits:**
+- ✅ Auto-discovers `.specstory` folders across many projects
+- ✅ Auto-adds metadata (`project=name`, `source_path=...`)
+- ✅ Watcher script for continuous monitoring
+- ✅ One command for multi-project ingestion
+
+### Regular Folder Ingestion
+
+Use the CLI directly when processing **any other documents** (PDFs, markdown, code, etc.):
+
+```bash
+# Ingest any folder directly
+python hybridrag.py ingest --folder /path/to/my/documents
+
+# Multiple folders
+python hybridrag.py ingest --folder ./docs --folder ./notes
+
+# With custom metadata
+python hybridrag.py ingest --folder ./project-docs \
+    --metadata "project=myproject" \
+    --metadata "team=engineering" \
+    --db-action add
+```
+
+**Use cases:**
+- 📄 Documentation folders
+- 📚 Research papers / PDFs
+- 💻 Code repositories
+- 📝 Meeting notes, wikis
+
+### Comparison Table
+
+| Feature | SpecStory Scripts | Regular `--folder` |
+|---------|-------------------|-------------------|
+| **Auto-discover** | Finds all `.specstory` recursively | You specify exact folder(s) |
+| **Auto-metadata** | Adds project name & path | You add metadata manually |
+| **Multi-project** | Handles many at once | One command per folder |
+| **Watcher** | `watch_specstory_folders.sh` | No built-in watcher |
+| **Best for** | Claude Code history | Any other documents |
+
+---
+
 ## 🐛 Troubleshooting
 
 ### No .specstory folders found
