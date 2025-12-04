@@ -1,0 +1,26 @@
+# Core dependencies
+lightrag>=0.0.1
+python-dotenv>=1.0.0
+asyncio-throttle>=1.0.0
+
+# LLM and embedding
+openai>=1.0.0
+tiktoken>=0.5.0
+
+# Document processing
+pypdf>=4.0.0
+beautifulsoup4>=4.12.0
+pyyaml>=6.0.0
+
+# Data processing
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Optional PromptChain integration
+# promptchain (install from GitHub if needed)
+
+# Development
+pytest>=7.0.0
+black>=23.0.0
+isort>=5.0.0
+flake8>=6.0.0

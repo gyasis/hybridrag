@@ -1,0 +1,105 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.env
+.venv/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# UV
+uv.lock
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Project specific
+athena_lightrag_db/
+*.log
+*.db
+*.sqlite
+*.sqlite3
+
+# LightRAG databases (generated data - do not track)
+lightrag_db/
+specstory_lightrag_db/
+specstory_lightrag_db.old_md5_version/
+
+# Experimental/legacy code (not tracked)
+legacy/
+experiments/
+
+# Docs folder (keep root README only)
+docs/
+
+# Data and examples (not tracked)
+data/
+examples/
+
+# Runtime/local data
+ingestion_queue/*
+!ingestion_queue/.gitkeep
+memory-bank/
+
+# Local tool configs
+.claude/
+.specstory/
+.cursorindexingignore
+
+# Env files (keep examples)
+.env
+.env.local
+.env.docker
+!.env.example
+!.env.docker.example
+
+# Jupyter
+.ipynb_checkpoints/
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json

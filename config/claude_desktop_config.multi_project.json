@@ -1,0 +1,43 @@
+{
+  "mcpServers": {
+    "project1-kb": {
+      "command": "python",
+      "args": [
+        "/home/user/hybridrag/hybridrag_mcp_server.py",
+        "--working-dir",
+        "/home/user/databases/project1_db",
+        "--name",
+        "project1"
+      ],
+      "env": {
+        "OPENAI_API_KEY": "${OPENAI_API_KEY}"
+      }
+    },
+    "project2-kb": {
+      "command": "python",
+      "args": [
+        "/home/user/hybridrag/hybridrag_mcp_server.py",
+        "--working-dir",
+        "/home/user/databases/project2_db",
+        "--name",
+        "project2"
+      ],
+      "env": {
+        "OPENAI_API_KEY": "${OPENAI_API_KEY}"
+      }
+    },
+    "books-kb": {
+      "command": "python",
+      "args": [
+        "/home/user/hybridrag/hybridrag_mcp_server.py",
+        "--working-dir",
+        "/home/user/databases/books_db",
+        "--name",
+        "personal-books"
+      ],
+      "env": {
+        "OPENAI_API_KEY": "${OPENAI_API_KEY}"
+      }
+    }
+  }
+}

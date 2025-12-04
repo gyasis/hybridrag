@@ -1,0 +1,21 @@
+# HybridRAG MCP Server Dependencies
+# ==================================
+# Install with: pip install -r requirements-mcp.txt
+
+# Core MCP Server Framework
+fastmcp>=2.0.0
+
+# LightRAG Knowledge Graph
+lightrag-hku>=0.0.0.6
+
+# OpenAI for LLM and Embeddings
+openai>=1.0.0
+
+# Data Validation
+pydantic>=2.0.0
+
+# Environment Variables
+python-dotenv>=1.0.0
+
+# Optional: Better performance with UV
+# Install UV: curl -LsSf https://astral.sh/uv/install.sh | sh

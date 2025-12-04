@@ -1,0 +1,26 @@
+{
+  "mcpServers": {
+    "hybridrag-uv": {
+      "comment": "Using UV for better performance and dependency isolation",
+      "command": "uv",
+      "args": [
+        "run",
+        "--with", "fastmcp>=2.0.0",
+        "--with", "lightrag-hku>=0.0.0.6",
+        "--with", "openai>=1.0.0",
+        "--with", "python-dotenv",
+        "python",
+        "/absolute/path/to/hybridrag/hybridrag_mcp_server.py",
+        "--working-dir",
+        "/absolute/path/to/databases/my_db",
+        "--name",
+        "my-project",
+        "--log-level",
+        "INFO"
+      ],
+      "env": {
+        "OPENAI_API_KEY": "${OPENAI_API_KEY}"
+      }
+    }
+  }
+}

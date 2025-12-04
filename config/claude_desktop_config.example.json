@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "hybridrag-example": {
+      "command": "python",
+      "args": [
+        "/absolute/path/to/hybridrag/hybridrag_mcp_server.py",
+        "--working-dir",
+        "/absolute/path/to/databases/my_project_db",
+        "--name",
+        "my-project"
+      ],
+      "env": {
+        "OPENAI_API_KEY": "sk-your-openai-api-key-here"
+      }
+    }
+  }
+}
