@@ -127,6 +127,8 @@ ingest_folder() {
         --metadata "project=$project_name" \
         --metadata "source_path=$folder" \
         --metadata "auto_watch=true" \
+        --yes \
+        --quiet \
         >> "$LOG_FILE" 2>&1; then
 
         log "✓ Successfully ingested $project_name"

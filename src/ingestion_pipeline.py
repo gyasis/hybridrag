@@ -15,6 +15,9 @@ from datetime import datetime
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 
+# Progress bar
+from tqdm import tqdm
+
 # Document processing imports
 import tiktoken
 import pypdf
@@ -399,18 +402,75 @@ class IngestionPipeline:
         logger.info("Starting IngestionPipeline")
         self._stop_event.clear()
         await self.ingestion_loop()
-    
+
     async def stop(self):
         """Stop the ingestion pipeline."""
         logger.info("Stopping IngestionPipeline")
         self._stop_event.set()
         self.executor.shutdown(wait=True)
-    
+
+    async def run_batch(self) -> Dict:
+        """
+        Run one-shot batch ingestion: process all queued files once and exit.
+
+        Returns:
+            Dict with ingestion results: files_found, files_processed, files_failed, errors
+        """
+        logger.info("Starting batch ingestion (one-shot mode)")
+
+        results = {
+            "files_found": 0,
+            "files_processed": 0,
+            "files_failed": 0,
+            "errors": []
+        }
+
+        # Process all queued files
+        queued_files = self.get_queued_files()
+        results["files_found"] = len(queued_files)
+
+        if not queued_files:
+            logger.info("No files queued for ingestion")
+            return results
+
+        logger.info(f"Found {len(queued_files)} files to process")
+
+        # Process with tqdm progress bar
+        with tqdm(total=len(queued_files), desc="Ingesting files", unit="file",
+                  bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]') as pbar:
+            for queue_metadata in queued_files:
+                original_path = queue_metadata.get('original_path', 'unknown')
+                file_name = Path(original_path).name
+                pbar.set_postfix_str(f"Current: {file_name[:30]}...")
+
+                try:
+                    success = await self.process_queued_file(queue_metadata)
+                    if success:
+                        results["files_processed"] += 1
+                        pbar.set_postfix_str(f"✓ {file_name[:30]}")
+                        logger.info(f"✓ Processed: {original_path}")
+                    else:
+                        results["files_failed"] += 1
+                        results["errors"].append(f"Failed to process: {original_path}")
+                        pbar.set_postfix_str(f"✗ {file_name[:30]}")
+                        logger.warning(f"✗ Failed: {original_path}")
+                except Exception as e:
+                    results["files_failed"] += 1
+                    error_msg = f"Error processing {original_path}: {str(e)}"
+                    results["errors"].append(error_msg)
+                    pbar.set_postfix_str(f"⚠ {file_name[:30]}")
+                    logger.error(error_msg)
+
+                pbar.update(1)
+
+        logger.info(f"Batch complete: {results['files_processed']}/{results['files_found']} processed, {results['files_failed']} failed")
+        return results
+
     def get_stats(self) -> Dict:
         """Get ingestion statistics."""
         queue_files = list(self.queue_dir.glob("*.json"))
         error_files = list((self.queue_dir / "errors").glob("*.json"))
-        
+
         return {
             "queued_files": len(queue_files),
             "error_files": len(error_files),

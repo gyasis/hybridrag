@@ -113,6 +113,9 @@ python hybridrag.py ingest --folder ./data
 python hybridrag.py ingest --folder ./data --db-action fresh  # Start fresh
 python hybridrag.py ingest --folder ./data --db-action add    # Add to existing
 
+# Ingestion with metadata and scripting flags
+python hybridrag.py ingest --folder ./data --metadata "project=myproject" --yes --quiet
+
 # Queries
 python hybridrag.py interactive                               # Interactive CLI
 python hybridrag.py query --text "..." --mode hybrid         # One-shot query
@@ -121,8 +124,43 @@ python hybridrag.py query --text "..." --agentic             # Multi-hop reasoni
 # Management
 python hybridrag.py status                                    # System status
 python hybridrag.py check-db                                  # Database info
+python hybridrag.py db-info                                   # Detailed database info with sources
+python hybridrag.py list-dbs                                  # List all databases
 python hybridrag.py --help                                    # Show help
 ```
+
+### Ingestion Flags
+
+| Flag | Description |
+|------|-------------|
+| `--folder PATH` | Folder(s) to ingest (can specify multiple) |
+| `--db-action {use,add,fresh}` | Database action: use existing, add to existing, or start fresh |
+| `--metadata KEY=VALUE` | Add metadata (can specify multiple, e.g., `--metadata project=foo --metadata version=1`) |
+| `--yes`, `-y` | Skip confirmation prompts (for scripted use) |
+| `--quiet`, `-q` | Suppress verbose output, show only progress bar |
+| `--recursive` | Watch folders recursively (default: true) |
+| `--multiprocess` | Use multiprocess architecture |
+
+### Multi-Project Ingestion Scripts
+
+For ingesting multiple `.specstory` folders at once:
+
+```bash
+# Ingest all .specstory folders into a SINGLE database (recommended)
+./scripts/ingest_specstory_folders.sh /path/to/jira-issues fresh
+
+# Ingest each project into SEPARATE databases
+./scripts/ingest_separate_databases.sh /path/to/projects
+
+# Watch for changes and auto-ingest
+./scripts/watch_specstory_folders.sh /path/to/jira-issues
+```
+
+Features:
+- **Progress bar**: tqdm-based progress during ingestion
+- **Restartable**: Queue-based architecture - files stay queued until processed
+- **Metadata tagging**: Each project tagged with `project=NAME` and `source_path`
+- **Error tracking**: Failed files moved to `ingestion_queue/errors/`
 
 ## ⚙️ Configuration
 

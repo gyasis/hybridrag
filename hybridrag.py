@@ -344,22 +344,31 @@ class HybridRAGCLI:
             metadata.add_source_folder(folder, recursive=recursive, extra_metadata=extra_metadata)
             print(f"   📝 Registered source folder: {folder}")
 
+        # Check for quiet mode
+        quiet_mode = hasattr(self.args, 'quiet') and self.args.quiet
+
         # Run ingestion (using existing pipeline)
         if self.args.multiprocess:
             await self._ingest_multiprocess(folders, recursive)
         else:
-            await self._ingest_single_process(folders, recursive)
+            await self._ingest_single_process(folders, recursive, quiet_mode=quiet_mode)
 
     async def _handle_database_action(self, action: str):
         """Handle database management actions."""
+        skip_confirm = hasattr(self.args, 'yes') and self.args.yes
+
         if action == 'fresh':
-            confirm = input("⚠️  This will DELETE existing database. Continue? [y/N]: ").strip().lower()
-            if confirm == 'y':
+            if skip_confirm:
                 self._clear_database()
-                print("✅ Database cleared - starting fresh")
+                print("✅ Database cleared - starting fresh (auto-confirmed)")
             else:
-                print("❌ Cancelled")
-                sys.exit(0)
+                confirm = input("⚠️  This will DELETE existing database. Continue? [y/N]: ").strip().lower()
+                if confirm == 'y':
+                    self._clear_database()
+                    print("✅ Database cleared - starting fresh")
+                else:
+                    print("❌ Cancelled")
+                    sys.exit(0)
         elif action == 'use':
             print("✅ Using existing database")
         elif action == 'add':
@@ -401,24 +410,67 @@ class HybridRAGCLI:
             print("❌ Invalid choice")
             return []
 
-    async def _ingest_single_process(self, folders: List[str], recursive: bool):
-        """Run ingestion in single process."""
+    async def _ingest_single_process(self, folders: List[str], recursive: bool, quiet_mode: bool = False):
+        """Run ingestion in single process (batch mode - process once and exit)."""
         from config.config import load_config
         from src.ingestion_pipeline import IngestionPipeline
         from src.lightrag_core import create_lightrag_core
+        from src.folder_watcher import FolderWatcher
 
         config = load_config(self.config_path)
         config.ingestion.watch_folders = folders
         config.ingestion.recursive = recursive
 
+        # Suppress verbose logging in quiet mode (keeps progress bar clean)
+        if quiet_mode:
+            # Suppress LightRAG and other verbose loggers
+            for logger_name in ['lightrag', 'lightrag.kg', 'lightrag.llm', 'nano_graphrag',
+                               'httpx', 'httpcore', 'openai']:
+                logging.getLogger(logger_name).setLevel(logging.WARNING)
+
         # Initialize components
         lightrag_core = create_lightrag_core(config)
+
+        # Step 1: Discover and queue files using FolderWatcher
+        watcher = FolderWatcher(config)
+        discovered_files = watcher.scan_folders()
+
+        print(f"   📂 Discovered {len(discovered_files)} file(s)")
+
+        # Queue discovered files
+        queued_count = 0
+        for file_info in discovered_files:
+            if watcher.queue_file(file_info):
+                queued_count += 1
+
+        print(f"   📝 Queued {queued_count} file(s) for ingestion")
+
+        # Step 2: Process queued files in batch mode
         pipeline = IngestionPipeline(config, lightrag_core)
+        results = await pipeline.run_batch()
 
-        # Start ingestion
-        await pipeline.start()
+        # Step 3: Record ingestion in metadata
+        metadata = DatabaseMetadata(self.working_dir)
+        for folder in folders:
+            metadata.record_ingestion(
+                folder_path=folder,
+                files_processed=results["files_processed"],
+                success=(results["files_failed"] == 0),
+                notes=f"Found: {results['files_found']}, Processed: {results['files_processed']}, Failed: {results['files_failed']}"
+            )
 
-        print("✅ Ingestion complete")
+        # Step 4: Print summary
+        print(f"\n✅ Ingestion complete:")
+        print(f"   Files found:     {results['files_found']}")
+        print(f"   Files processed: {results['files_processed']}")
+        print(f"   Files failed:    {results['files_failed']}")
+
+        if results["errors"]:
+            print(f"\n⚠️  Errors:")
+            for error in results["errors"][:10]:  # Show first 10 errors
+                print(f"   - {error}")
+            if len(results["errors"]) > 10:
+                print(f"   ... and {len(results['errors']) - 10} more errors")
 
     async def _ingest_multiprocess(self, folders: List[str], recursive: bool):
         """Run ingestion with multiprocess architecture."""
@@ -659,6 +711,10 @@ Examples:
     ingest_parser.add_argument('--multiprocess', action='store_true', help='Use multiprocess architecture')
     ingest_parser.add_argument('--metadata', action='append', metavar='KEY=VALUE',
                               help='Add metadata key=value pairs (can specify multiple)')
+    ingest_parser.add_argument('--yes', '-y', action='store_true',
+                              help='Skip confirmation prompts (for scripted use)')
+    ingest_parser.add_argument('--quiet', '-q', action='store_true',
+                              help='Suppress verbose LightRAG output (show only progress bar)')
 
     # Status command
     status_parser = subparsers.add_parser('status', help='Show system status')

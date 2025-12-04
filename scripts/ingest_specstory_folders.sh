@@ -218,12 +218,15 @@ while IFS= read -r folder; do
     log "[$COUNTER/$FOLDER_COUNT] Processing $PROJECT_NAME from $folder (action: $CURRENT_DB_ACTION)"
 
     # Ingest with metadata tagging
+    # Note: --yes skips confirmation prompts, --quiet suppresses verbose output, </dev/null prevents stdin consumption
     if python "$HYBRIDRAG_DIR/hybridrag.py" ingest \
         --folder "$folder" \
         --db-action "$CURRENT_DB_ACTION" \
         --metadata "project=$PROJECT_NAME" \
         --metadata "source_path=$folder" \
-        >> "$LOG_FILE" 2>&1; then
+        --yes \
+        --quiet \
+        </dev/null >> "$LOG_FILE" 2>&1; then
 
         echo -e "  ${GREEN}✓ Success${NC}"
         log "  SUCCESS: $PROJECT_NAME ingested"

@@ -179,13 +179,16 @@ while IFS= read -r folder; do
     mkdir -p "$DB_PATH"
 
     # Ingest with custom database path
+    # Note: --yes skips confirmation prompts, --quiet suppresses verbose output, </dev/null prevents stdin consumption
     if LIGHTRAG_WORKING_DIR="$DB_PATH" \
        python "$HYBRIDRAG_DIR/hybridrag.py" ingest \
        --folder "$folder" \
        --db-action fresh \
        --metadata "project=$PROJECT_NAME" \
        --metadata "source_path=$folder" \
-       >> "$LOG_FILE" 2>&1; then
+       --yes \
+       --quiet \
+       </dev/null >> "$LOG_FILE" 2>&1; then
 
         echo -e "  ${GREEN}✓ Success${NC}"
         log "  SUCCESS: Database created for $PROJECT_NAME"
