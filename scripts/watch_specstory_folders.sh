@@ -121,6 +121,8 @@ ingest_folder() {
 
     log "Ingesting changes from $project_name ($folder)"
 
+    # Note: --yes skips confirmation prompts, --quiet suppresses verbose output, </dev/null prevents stdin consumption
+    # Use tee to show progress bar on screen while also logging, stderr goes to log only
     if python "$HYBRIDRAG_DIR/hybridrag.py" ingest \
         --folder "$folder" \
         --db-action add \
@@ -129,7 +131,7 @@ ingest_folder() {
         --metadata "auto_watch=true" \
         --yes \
         --quiet \
-        >> "$LOG_FILE" 2>&1; then
+        </dev/null 2>> "$LOG_FILE" | tee -a "$LOG_FILE"; then
 
         log "✓ Successfully ingested $project_name"
         return 0

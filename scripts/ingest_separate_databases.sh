@@ -180,6 +180,7 @@ while IFS= read -r folder; do
 
     # Ingest with custom database path
     # Note: --yes skips confirmation prompts, --quiet suppresses verbose output, </dev/null prevents stdin consumption
+    # Use tee to show progress bar on screen while also logging, stderr goes to log only
     if LIGHTRAG_WORKING_DIR="$DB_PATH" \
        python "$HYBRIDRAG_DIR/hybridrag.py" ingest \
        --folder "$folder" \
@@ -188,7 +189,7 @@ while IFS= read -r folder; do
        --metadata "source_path=$folder" \
        --yes \
        --quiet \
-       </dev/null >> "$LOG_FILE" 2>&1; then
+       </dev/null 2>> "$LOG_FILE" | tee -a "$LOG_FILE"; then
 
         echo -e "  ${GREEN}✓ Success${NC}"
         log "  SUCCESS: Database created for $PROJECT_NAME"

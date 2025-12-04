@@ -219,6 +219,7 @@ while IFS= read -r folder; do
 
     # Ingest with metadata tagging
     # Note: --yes skips confirmation prompts, --quiet suppresses verbose output, </dev/null prevents stdin consumption
+    # Use tee to show progress bar on screen while also logging, stderr goes to log only
     if python "$HYBRIDRAG_DIR/hybridrag.py" ingest \
         --folder "$folder" \
         --db-action "$CURRENT_DB_ACTION" \
@@ -226,7 +227,7 @@ while IFS= read -r folder; do
         --metadata "source_path=$folder" \
         --yes \
         --quiet \
-        </dev/null >> "$LOG_FILE" 2>&1; then
+        </dev/null 2>> "$LOG_FILE" | tee -a "$LOG_FILE"; then
 
         echo -e "  ${GREEN}✓ Success${NC}"
         log "  SUCCESS: $PROJECT_NAME ingested"
