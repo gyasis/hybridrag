@@ -15,6 +15,10 @@ from datetime import datetime
 import json
 import sys
 import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Add promptchain to path
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -30,6 +34,12 @@ except ImportError:
 from lightrag_core import QueryResult, QueryMode, ResponseType
 
 logger = logging.getLogger(__name__)
+
+# Get agentic model from environment variable, fallback to LIGHTRAG_MODEL, then Azure default
+DEFAULT_AGENTIC_MODEL = os.getenv(
+    "AGENTIC_MODEL",
+    os.getenv("LIGHTRAG_MODEL", "azure/gpt-5.1")
+)
 
 @dataclass
 class SearchResult:
@@ -273,28 +283,32 @@ class SearchInterface:
         query: str,
         objective: str = None,
         max_steps: int = 5,
-        model_name: str = "openai/gpt-4o-mini"
+        model_name: str = None
     ) -> SearchResult:
         """
         Perform complex multi-hop reasoning search using AgenticStepProcessor.
-        
+
         Args:
             query: Initial search query
             objective: Specific objective for the search (optional)
             max_steps: Maximum reasoning steps
-            model_name: Model to use for reasoning
-            
+            model_name: Model to use for reasoning (defaults to AGENTIC_MODEL env var)
+
         Returns:
             SearchResult with agentic reasoning steps
         """
         if not self.agentic_enabled:
             logger.error("Agentic search requested but PromptChain not available")
             return await self.simple_search(query)
-        
+
+        # Use environment variable default if model_name not specified
+        if model_name is None:
+            model_name = DEFAULT_AGENTIC_MODEL
+
         start_time = time.time()
-        
+
         try:
-            logger.info(f"Agentic search: '{query}' (max_steps: {max_steps})")
+            logger.info(f"Agentic search: '{query}' (model: {model_name}, max_steps: {max_steps})")
             
             # Set default objective if not provided
             if not objective:
