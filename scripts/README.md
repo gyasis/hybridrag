@@ -26,7 +26,10 @@ Specialized scripts for processing multiple projects' `.specstory` folders.
 - ✅ Searches recursively for `.specstory` folders
 - ✅ Unified database (cross-project queries)
 - ✅ Automatic metadata tagging (project name, source path)
-- ✅ Interactive confirmation prompts
+- ✅ Interactive confirmation prompts (or `--yes` for scripted use)
+- ✅ tqdm progress bar during ingestion
+- ✅ Queue-based architecture (restartable on failure)
+- ✅ Quiet mode (`--quiet`) for clean output
 - ✅ Detailed logging with timestamps
 
 **Example Output**:

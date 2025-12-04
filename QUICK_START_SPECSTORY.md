@@ -50,7 +50,14 @@ nano .env  # Add your OPENAI_API_KEY
 #   → hybridrag (.specstory)
 #   → project-alpha (.specstory)
 #   → project-beta (.specstory)
+#
+# Progress bar: Ingesting files: 45%|████████    | 25/56 [01:23<01:42]
 ```
+
+**Features:**
+- ✅ tqdm progress bar during ingestion
+- ✅ Queue-based architecture (restartable on failure)
+- ✅ Automatic metadata tagging per project
 
 ### 5. Start Querying! (1 min)
 
@@ -193,8 +200,10 @@ LIGHTRAG_WORKING_DIR="./lightrag_db_project1" python hybridrag.py interactive
 ### Check Database Status
 
 ```bash
-python hybridrag.py check-db
-python hybridrag.py status
+python hybridrag.py check-db      # Quick database check
+python hybridrag.py db-info       # Detailed info with source folders
+python hybridrag.py list-dbs      # List all databases in directory
+python hybridrag.py status        # System status
 ```
 
 ### Query Modes
@@ -219,6 +228,27 @@ python hybridrag.py query --text "complex question" --agentic
 # Or start fresh
 ./scripts/ingest_specstory_folders.sh /home/gyasis/Documents/code fresh
 ```
+
+### Advanced Ingestion (Direct CLI)
+
+For fine-grained control, use the CLI directly:
+
+```bash
+# With custom metadata
+python hybridrag.py ingest --folder ./my-project/.specstory \
+    --db-action add \
+    --metadata "project=myproject" \
+    --metadata "version=2.0"
+
+# Scripted (no prompts, quiet output)
+python hybridrag.py ingest --folder ./data --db-action fresh --yes --quiet
+```
+
+| Flag | Description |
+|------|-------------|
+| `--metadata KEY=VALUE` | Add custom metadata (can use multiple times) |
+| `--yes`, `-y` | Skip confirmation prompts |
+| `--quiet`, `-q` | Suppress verbose output, show only progress bar |
 
 ---
 
