@@ -17,6 +17,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 # Progress bar
 from tqdm import tqdm
+import re
+import sys
 
 # Document processing imports
 import tiktoken
@@ -26,6 +28,81 @@ import csv
 import yaml
 
 logger = logging.getLogger(__name__)
+
+
+class TqdmLoggingHandler(logging.Handler):
+    """
+    Custom logging handler that intercepts LightRAG chunk progress messages
+    and updates a tqdm progress bar instead of printing to console.
+    """
+
+    # Pattern to match: "Chunk 284 of 1477 extracted 7 Ent + 6 Rel chunk-xxx"
+    CHUNK_PATTERN = re.compile(r'Chunk (\d+) of (\d+) extracted (\d+) Ent \+ (\d+) Rel')
+
+    def __init__(self, chunk_pbar: tqdm = None):
+        super().__init__()
+        self.chunk_pbar = chunk_pbar
+        self.total_chunks = 0
+        self.current_chunk = 0
+        self.total_entities = 0
+        self.total_relations = 0
+
+    def set_pbar(self, pbar: tqdm):
+        """Set or update the progress bar reference."""
+        self.chunk_pbar = pbar
+
+    def reset_stats(self):
+        """Reset statistics for a new file."""
+        self.total_chunks = 0
+        self.current_chunk = 0
+        self.total_entities = 0
+        self.total_relations = 0
+
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+
+            # Check if this is a chunk progress message
+            match = self.CHUNK_PATTERN.search(msg)
+            if match:
+                current = int(match.group(1))
+                total = int(match.group(2))
+                entities = int(match.group(3))
+                relations = int(match.group(4))
+
+                # Update totals
+                self.total_entities += entities
+                self.total_relations += relations
+
+                # Update progress bar if available
+                if self.chunk_pbar is not None:
+                    # Set total on first chunk
+                    if self.chunk_pbar.total != total:
+                        self.chunk_pbar.total = total
+                        self.chunk_pbar.refresh()
+
+                    # Update progress
+                    delta = current - self.current_chunk
+                    if delta > 0:
+                        self.chunk_pbar.update(delta)
+
+                    # Update postfix with entity/relation counts
+                    self.chunk_pbar.set_postfix_str(
+                        f"Ent:{self.total_entities} Rel:{self.total_relations}"
+                    )
+
+                self.current_chunk = current
+                self.total_chunks = total
+
+            # Also check for cache/LLM messages to show activity
+            elif 'LLM cache' in msg or 'extracted' in msg.lower():
+                if self.chunk_pbar is not None:
+                    # Just update the display to show activity
+                    self.chunk_pbar.refresh()
+
+        except Exception:
+            self.handleError(record)
+
 
 class DocumentProcessor:
     """Process various document types into text chunks."""
@@ -435,33 +512,67 @@ class IngestionPipeline:
 
         logger.info(f"Found {len(queued_files)} files to process")
 
-        # Process with tqdm progress bar
-        with tqdm(total=len(queued_files), desc="Ingesting files", unit="file",
-                  bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]') as pbar:
-            for queue_metadata in queued_files:
-                original_path = queue_metadata.get('original_path', 'unknown')
-                file_name = Path(original_path).name
-                pbar.set_postfix_str(f"Current: {file_name[:30]}...")
+        # Set up nested progress bars with LightRAG log interception
+        # Get LightRAG logger and set up our custom handler
+        lightrag_logger = logging.getLogger("lightrag")
 
-                try:
-                    success = await self.process_queued_file(queue_metadata)
-                    if success:
-                        results["files_processed"] += 1
-                        pbar.set_postfix_str(f"✓ {file_name[:30]}")
-                        logger.info(f"✓ Processed: {original_path}")
-                    else:
-                        results["files_failed"] += 1
-                        results["errors"].append(f"Failed to process: {original_path}")
-                        pbar.set_postfix_str(f"✗ {file_name[:30]}")
-                        logger.warning(f"✗ Failed: {original_path}")
-                except Exception as e:
-                    results["files_failed"] += 1
-                    error_msg = f"Error processing {original_path}: {str(e)}"
-                    results["errors"].append(error_msg)
-                    pbar.set_postfix_str(f"⚠ {file_name[:30]}")
-                    logger.error(error_msg)
+        # Create our custom handler for chunk progress
+        tqdm_handler = TqdmLoggingHandler()
+        tqdm_handler.setLevel(logging.INFO)
 
-                pbar.update(1)
+        # Remove existing handlers temporarily and add ours
+        original_handlers = lightrag_logger.handlers.copy()
+        lightrag_logger.handlers.clear()
+        lightrag_logger.addHandler(tqdm_handler)
+
+        try:
+            # Outer progress bar for files (position=0 is bottom in nested mode)
+            with tqdm(total=len(queued_files), desc="📁 Files", unit="file",
+                      position=0, leave=True, file=sys.stderr,
+                      bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]') as file_pbar:
+
+                for queue_metadata in queued_files:
+                    original_path = queue_metadata.get('original_path', 'unknown')
+                    file_name = Path(original_path).name
+                    file_pbar.set_postfix_str(file_name[:40])
+
+                    # Inner progress bar for chunks (position=1 is above files bar)
+                    with tqdm(total=100, desc="   📦 Chunks", unit="chunk",
+                              position=1, leave=False, file=sys.stderr,
+                              bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{rate_fmt}] {postfix}') as chunk_pbar:
+
+                        # Connect chunk progress bar to our handler
+                        tqdm_handler.set_pbar(chunk_pbar)
+                        tqdm_handler.reset_stats()
+
+                        try:
+                            success = await self.process_queued_file(queue_metadata)
+                            if success:
+                                results["files_processed"] += 1
+                                file_pbar.set_postfix_str(f"✓ {file_name[:35]}")
+                                logger.info(f"✓ Processed: {original_path}")
+                            else:
+                                results["files_failed"] += 1
+                                results["errors"].append(f"Failed to process: {original_path}")
+                                file_pbar.set_postfix_str(f"✗ {file_name[:35]}")
+                                logger.warning(f"✗ Failed: {original_path}")
+                        except Exception as e:
+                            results["files_failed"] += 1
+                            error_msg = f"Error processing {original_path}: {str(e)}"
+                            results["errors"].append(error_msg)
+                            file_pbar.set_postfix_str(f"⚠ {file_name[:35]}")
+                            logger.error(error_msg)
+
+                        # Disconnect chunk progress bar
+                        tqdm_handler.set_pbar(None)
+
+                    file_pbar.update(1)
+
+        finally:
+            # Restore original LightRAG handlers
+            lightrag_logger.handlers.clear()
+            for handler in original_handlers:
+                lightrag_logger.addHandler(handler)
 
         logger.info(f"Batch complete: {results['files_processed']}/{results['files_found']} processed, {results['files_failed']} failed")
         return results
