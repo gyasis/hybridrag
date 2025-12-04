@@ -321,17 +321,27 @@ class HybridRAGCLI:
 
         recursive = self.args.recursive if hasattr(self.args, 'recursive') else True
 
+        # Parse metadata key=value pairs if provided
+        extra_metadata = {}
+        if hasattr(self.args, 'metadata') and self.args.metadata:
+            for item in self.args.metadata:
+                if '=' in item:
+                    key, value = item.split('=', 1)
+                    extra_metadata[key] = value
+
         print(f"\n🚀 Starting ingestion:")
         print(f"   Folders: {', '.join(folders)}")
         print(f"   Recursive: {recursive}")
         print(f"   Database: {self.working_dir}")
+        if extra_metadata:
+            print(f"   Metadata: {extra_metadata}")
 
         # Initialize metadata
         metadata = DatabaseMetadata(self.working_dir)
 
-        # Add source folders to metadata
+        # Add source folders to metadata with extra metadata
         for folder in folders:
-            metadata.add_source_folder(folder, recursive=recursive)
+            metadata.add_source_folder(folder, recursive=recursive, extra_metadata=extra_metadata)
             print(f"   📝 Registered source folder: {folder}")
 
         # Run ingestion (using existing pipeline)
@@ -647,6 +657,8 @@ Examples:
     ingest_parser.add_argument('--db-action', choices=['use', 'add', 'fresh'],
                               help='Database action: use existing, add to existing, or start fresh')
     ingest_parser.add_argument('--multiprocess', action='store_true', help='Use multiprocess architecture')
+    ingest_parser.add_argument('--metadata', action='append', metavar='KEY=VALUE',
+                              help='Add metadata key=value pairs (can specify multiple)')
 
     # Status command
     status_parser = subparsers.add_parser('status', help='Show system status')

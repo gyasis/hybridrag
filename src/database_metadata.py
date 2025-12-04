@@ -50,13 +50,14 @@ class DatabaseMetadata:
         with open(self.metadata_file, 'w') as f:
             json.dump(self.metadata, f, indent=2)
 
-    def add_source_folder(self, folder_path: str, recursive: bool = True):
+    def add_source_folder(self, folder_path: str, recursive: bool = True, extra_metadata: Optional[Dict[str, Any]] = None):
         """
         Add a source folder to tracked sources.
 
         Args:
             folder_path: Path to source folder
             recursive: Whether folder was watched recursively
+            extra_metadata: Additional metadata key=value pairs (e.g., project name)
         """
         folder_path = str(Path(folder_path).resolve())
 
@@ -66,16 +67,22 @@ class DatabaseMetadata:
                 # Update existing entry
                 source["last_ingested"] = datetime.now().isoformat()
                 source["recursive"] = recursive
+                if extra_metadata:
+                    source.update(extra_metadata)
                 self._save_metadata()
                 return
 
         # Add new source
-        self.metadata["source_folders"].append({
+        source_entry = {
             "path": folder_path,
             "added_at": datetime.now().isoformat(),
             "last_ingested": datetime.now().isoformat(),
             "recursive": recursive
-        })
+        }
+        if extra_metadata:
+            source_entry.update(extra_metadata)
+
+        self.metadata["source_folders"].append(source_entry)
         self._save_metadata()
 
     def record_ingestion(self,
