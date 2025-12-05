@@ -526,47 +526,55 @@ class IngestionPipeline:
         lightrag_logger.addHandler(tqdm_handler)
 
         try:
-            # Outer progress bar for files (position=0 is bottom in nested mode)
-            with tqdm(total=len(queued_files), desc="📁 Files", unit="file",
-                      position=0, leave=True, file=sys.stderr,
-                      bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]') as file_pbar:
+            # Single file-level progress bar with chunk info in postfix
+            # This works reliably across all terminal setups
+            with tqdm(total=len(queued_files), desc="📁 Ingesting", unit="file",
+                      leave=True, dynamic_ncols=True, mininterval=0.3,
+                      bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} files [{elapsed}<{remaining}] {postfix}') as file_pbar:
 
-                for queue_metadata in queued_files:
+                for idx, queue_metadata in enumerate(queued_files):
                     original_path = queue_metadata.get('original_path', 'unknown')
                     file_name = Path(original_path).name
-                    file_pbar.set_postfix_str(file_name[:40])
 
-                    # Inner progress bar for chunks (position=1 is above files bar)
-                    with tqdm(total=100, desc="   📦 Chunks", unit="chunk",
-                              position=1, leave=False, file=sys.stderr,
-                              bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{rate_fmt}] {postfix}') as chunk_pbar:
+                    # Show current file being processed
+                    file_pbar.set_postfix_str(f"📄 {file_name[:30]}")
 
-                        # Connect chunk progress bar to our handler
-                        tqdm_handler.set_pbar(chunk_pbar)
-                        tqdm_handler.reset_stats()
+                    # Create chunk progress bar for this file
+                    chunk_pbar = tqdm(total=100, desc="   📦 Chunks", unit="chunk",
+                                      leave=False, dynamic_ncols=True, mininterval=0.2,
+                                      bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{rate_fmt}] {postfix}')
 
-                        try:
-                            success = await self.process_queued_file(queue_metadata)
-                            if success:
-                                results["files_processed"] += 1
-                                file_pbar.set_postfix_str(f"✓ {file_name[:35]}")
-                                logger.info(f"✓ Processed: {original_path}")
-                            else:
-                                results["files_failed"] += 1
-                                results["errors"].append(f"Failed to process: {original_path}")
-                                file_pbar.set_postfix_str(f"✗ {file_name[:35]}")
-                                logger.warning(f"✗ Failed: {original_path}")
-                        except Exception as e:
+                    # Connect chunk progress bar to our handler
+                    tqdm_handler.set_pbar(chunk_pbar)
+                    tqdm_handler.reset_stats()
+
+                    try:
+                        success = await self.process_queued_file(queue_metadata)
+                        if success:
+                            results["files_processed"] += 1
+                            # Show final stats for this file
+                            ent = tqdm_handler.total_entities
+                            rel = tqdm_handler.total_relations
+                            tqdm.write(f"  ✓ {file_name[:40]} - {tqdm_handler.total_chunks} chunks, {ent} entities, {rel} relations")
+                            logger.info(f"✓ Processed: {original_path}")
+                        else:
                             results["files_failed"] += 1
-                            error_msg = f"Error processing {original_path}: {str(e)}"
-                            results["errors"].append(error_msg)
-                            file_pbar.set_postfix_str(f"⚠ {file_name[:35]}")
-                            logger.error(error_msg)
-
-                        # Disconnect chunk progress bar
+                            results["errors"].append(f"Failed to process: {original_path}")
+                            tqdm.write(f"  ✗ {file_name[:40]} - FAILED")
+                            logger.warning(f"✗ Failed: {original_path}")
+                    except Exception as e:
+                        results["files_failed"] += 1
+                        error_msg = f"Error processing {original_path}: {str(e)}"
+                        results["errors"].append(error_msg)
+                        tqdm.write(f"  ⚠ {file_name[:40]} - ERROR: {str(e)[:50]}")
+                        logger.error(error_msg)
+                    finally:
+                        # Close and disconnect chunk progress bar
                         tqdm_handler.set_pbar(None)
+                        chunk_pbar.close()
 
                     file_pbar.update(1)
+                    file_pbar.set_postfix_str(f"Done: {results['files_processed']}/{idx+1}")
 
         finally:
             # Restore original LightRAG handlers
