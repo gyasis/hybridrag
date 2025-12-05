@@ -218,16 +218,15 @@ while IFS= read -r folder; do
     log "[$COUNTER/$FOLDER_COUNT] Processing $PROJECT_NAME from $folder (action: $CURRENT_DB_ACTION)"
 
     # Ingest with metadata tagging
-    # Note: --yes skips confirmation prompts, --quiet suppresses verbose output, </dev/null prevents stdin consumption
-    # Use tee to show progress bar on screen while also logging, stderr goes to log only
+    # Note: --yes skips confirmation prompts, </dev/null prevents stdin consumption
+    # 2>&1 merges stderr into stdout so tqdm progress bars reach terminal AND log file
     if python "$HYBRIDRAG_DIR/hybridrag.py" ingest \
         --folder "$folder" \
         --db-action "$CURRENT_DB_ACTION" \
         --metadata "project=$PROJECT_NAME" \
         --metadata "source_path=$folder" \
         --yes \
-        --quiet \
-        </dev/null 2>> "$LOG_FILE" | tee -a "$LOG_FILE"; then
+        </dev/null 2>&1 | tee -a "$LOG_FILE"; then
 
         echo -e "  ${GREEN}✓ Success${NC}"
         log "  SUCCESS: $PROJECT_NAME ingested"

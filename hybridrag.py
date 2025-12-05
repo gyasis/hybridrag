@@ -375,11 +375,25 @@ class HybridRAGCLI:
             print("✅ Adding to existing database")
 
     def _clear_database(self):
-        """Clear existing database."""
+        """Clear existing database and file tracking."""
+        # Clear LightRAG database
         db_path = Path(self.working_dir)
         if db_path.exists():
             shutil.rmtree(db_path)
-            print(f"🗑️  Cleared: {db_path}")
+            print(f"🗑️  Cleared LightRAG DB: {db_path}")
+
+        # Clear file tracking database (processed_files.db)
+        # This ensures 'fresh' truly starts fresh by re-processing all files
+        tracker_db = Path("./processed_files.db")
+        if tracker_db.exists():
+            tracker_db.unlink()
+            print(f"🗑️  Cleared file tracker: {tracker_db}")
+
+        # Also clear the ingestion queue
+        queue_dir = Path("./ingestion_queue")
+        if queue_dir.exists():
+            shutil.rmtree(queue_dir)
+            print(f"🗑️  Cleared ingestion queue: {queue_dir}")
 
     def _choose_folders(self) -> List[str]:
         """Interactive folder selection."""
