@@ -34,9 +34,9 @@ A comprehensive knowledge graph-based retrieval system that combines folder watc
 
 ## 📋 Prerequisites
 
-- Python 3.8+ 
-- OpenAI API key
-- Optional: Anthropic API key (for enhanced agentic features)
+- Python 3.8+
+- Azure API key (preferred) or OpenAI API key
+- Optional: Other LLM provider keys (Anthropic, Gemini) for alternative models
 
 ## 🛠️ Installation
 
@@ -154,6 +154,10 @@ For ingesting multiple `.specstory` folders at once:
 
 # Watch for changes and auto-ingest
 ./scripts/watch_specstory_folders.sh /path/to/jira-issues
+
+# Use specific model (e.g., Gemini)
+./scripts/ingest_specstory_folders.sh /path/to/projects fresh gemini/gemini-pro
+./scripts/watch_specstory_folders.sh /path/to/projects 300 anthropic/claude-opus
 ```
 
 Features:
@@ -171,10 +175,23 @@ The system uses a hierarchical configuration in `config/config.py`:
 @dataclass
 class LightRAGConfig:
     working_dir: str = "./lightrag_db"
-    model_name: str = "gpt-4o-mini"
-    embedding_model: str = "text-embedding-3-small"
+    model_name: str = "azure/gpt-5.1"           # Default: Azure GPT-5.1
+    embedding_model: str = "azure/text-embedding-3-small"
     chunk_size: int = 1200
     chunk_overlap: int = 100
+```
+
+**Model Override**: You can override models at runtime:
+```bash
+# Use Gemini instead of Azure
+python hybridrag.py --model gemini/gemini-pro ingest --folder ./data
+
+# Use Anthropic Claude
+python hybridrag.py --model anthropic/claude-opus query --text "your query"
+
+# Set via environment variable
+export LIGHTRAG_MODEL="openai/gpt-4o"
+python hybridrag.py interactive
 ```
 
 ### Ingestion Configuration
@@ -357,7 +374,7 @@ The system implements comprehensive error handling:
 2. **API Rate Limits**: Reduce batch sizes and increase delays
 3. **Memory Issues**: Lower chunk sizes and concurrent processing
 4. **File Processing**: Check file permissions and encoding
-5. **LightRAG Errors**: Verify OpenAI API key and model access
+5. **LightRAG Errors**: Verify API key for your model provider (AZURE_API_KEY, OPENAI_API_KEY, etc.)
 
 ### Debug Mode
 Enable verbose logging:
@@ -388,7 +405,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 - **LightRAG**: Knowledge graph construction and querying
 - **PromptChain**: Multi-hop reasoning and agent orchestration
-- **OpenAI**: Language models and embeddings
+- **LiteLLM**: Unified interface for multiple LLM providers (Azure, OpenAI, Anthropic, Gemini)
 - **Community**: Various document processing libraries
 
 ---

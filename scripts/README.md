@@ -20,7 +20,18 @@ Specialized scripts for processing multiple projects' `.specstory` folders.
 
 # Add to existing database
 ./scripts/ingest_specstory_folders.sh /home/gyasis/Documents/code add
+
+# Use specific model (third argument)
+./scripts/ingest_specstory_folders.sh /home/gyasis/Documents/code fresh gemini/gemini-pro
+./scripts/ingest_specstory_folders.sh /home/gyasis/Documents/code add anthropic/claude-opus
 ```
+
+**Arguments**:
+| Argument | Description |
+|----------|-------------|
+| `parent_path` | Directory to search for `.specstory` folders |
+| `db_action` | `fresh` (new DB) or `add` (append to existing) |
+| `model` | Optional LLM model override (e.g., `gemini/gemini-pro`, `openai/gpt-4o`) |
 
 **Features**:
 - ✅ Searches recursively for `.specstory` folders
@@ -50,7 +61,16 @@ Proceed with ingestion? [y/N]
 **Usage**:
 ```bash
 ./scripts/ingest_separate_databases.sh /home/gyasis/Documents/code
+
+# Use specific model
+./scripts/ingest_separate_databases.sh /home/gyasis/Documents/code gemini/gemini-pro
 ```
+
+**Arguments**:
+| Argument | Description |
+|----------|-------------|
+| `parent_path` | Directory to search for `.specstory` folders |
+| `model` | Optional LLM model override (e.g., `gemini/gemini-pro`, `anthropic/claude-opus`) |
 
 **Creates**:
 ```
@@ -82,9 +102,19 @@ LIGHTRAG_WORKING_DIR="./lightrag_db_project1" python hybridrag.py interactive
 # Watch with 1-minute interval
 ./scripts/watch_specstory_folders.sh /home/gyasis/Documents/code 60
 
+# Use specific model (third argument)
+./scripts/watch_specstory_folders.sh /home/gyasis/Documents/code 300 gemini/gemini-pro
+
 # Run in background
 nohup ./scripts/watch_specstory_folders.sh /home/gyasis/Documents/code > watcher.log 2>&1 &
 ```
+
+**Arguments**:
+| Argument | Description |
+|----------|-------------|
+| `parent_path` | Directory to search for `.specstory` folders |
+| `interval` | Check interval in seconds (default: 300 = 5 minutes) |
+| `model` | Optional LLM model override (e.g., `gemini/gemini-pro`, `anthropic/claude-opus`) |
 
 **Features**:
 - ✅ Real-time monitoring of file changes
@@ -344,11 +374,22 @@ tail -n 100 logs/*.log
 |------|---------|
 | **One-time ingestion** | `./scripts/ingest_specstory_folders.sh /path fresh` |
 | **Add to existing** | `./scripts/ingest_specstory_folders.sh /path add` |
+| **With specific model** | `./scripts/ingest_specstory_folders.sh /path fresh gemini/gemini-pro` |
 | **Separate databases** | `./scripts/ingest_separate_databases.sh /path` |
 | **Start watcher** | `./scripts/watch_specstory_folders.sh /path 300` |
+| **Watcher with model** | `./scripts/watch_specstory_folders.sh /path 300 anthropic/claude-opus` |
 | **Setup systemd** | `sudo ./scripts/setup_systemd_watcher.sh /path 300` |
 | **Stop watcher** | `kill $(cat /tmp/hybridrag_watcher.pid)` |
 | **View logs** | `tail -f logs/watcher_*.log` |
+
+### Supported Model Formats (LiteLLM)
+
+| Provider | Model Format Example |
+|----------|---------------------|
+| Azure (default) | `azure/gpt-5.1` |
+| OpenAI | `openai/gpt-4o`, `openai/gpt-4o-mini` |
+| Anthropic | `anthropic/claude-opus`, `anthropic/claude-sonnet` |
+| Gemini | `gemini/gemini-pro`, `gemini/gemini-flash` |
 
 ---
 

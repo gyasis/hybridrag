@@ -36,8 +36,14 @@ uv pip install git+https://github.com/gyasis/PromptChain.git
 
 ```bash
 cp .env.example .env
-nano .env  # Add your OPENAI_API_KEY
+nano .env  # Add your AZURE_API_KEY (preferred) or OPENAI_API_KEY
 ```
+
+**Supported Providers** (via LiteLLM):
+- `AZURE_API_KEY` - Azure OpenAI (default)
+- `OPENAI_API_KEY` - OpenAI
+- `ANTHROPIC_API_KEY` - Anthropic Claude
+- `GEMINI_API_KEY` - Google Gemini
 
 ### 4. Find & Ingest .specstory Folders (15 min)
 
@@ -323,11 +329,11 @@ echo "Test content" > ~/Documents/code/test-project/.specstory/test.md
 ### API Key errors
 
 ```bash
-# Check .env file
-cat .env | grep OPENAI_API_KEY
+# Check .env file for Azure (preferred) or OpenAI key
+cat .env | grep -E "(AZURE|OPENAI)_API_KEY"
 
 # Test key is loaded
-python -c "from dotenv import load_dotenv; import os; load_dotenv(); print(os.getenv('OPENAI_API_KEY')[:10])"
+python -c "from dotenv import load_dotenv; import os; load_dotenv(); key = os.getenv('AZURE_API_KEY') or os.getenv('OPENAI_API_KEY'); print(key[:10] if key else 'No key found')"
 ```
 
 ### Docker container exits
