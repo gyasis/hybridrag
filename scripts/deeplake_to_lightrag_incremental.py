@@ -61,10 +61,11 @@ class DeepLakeToLightRAGIncremental:
         """
         self.deeplake_path = deeplake_path
         self.lightrag_working_dir = lightrag_working_dir
-        self.api_key = openai_api_key or os.getenv("OPENAI_API_KEY")
+        # Prefer Azure API key, fall back to OpenAI
+        self.api_key = openai_api_key or os.getenv("AZURE_API_KEY") or os.getenv("OPENAI_API_KEY")
 
         if not self.api_key:
-            raise ValueError("OpenAI API key not found. Set OPENAI_API_KEY environment variable.")
+            raise ValueError("API key not found. Set AZURE_API_KEY or OPENAI_API_KEY environment variable.")
 
         # Create working directory
         Path(self.lightrag_working_dir).mkdir(parents=True, exist_ok=True)
@@ -76,14 +77,18 @@ class DeepLakeToLightRAGIncremental:
         self._open_deeplake()
 
     def _init_lightrag(self):
-        """Initialize LightRAG with OpenAI models."""
+        """Initialize LightRAG with Azure models (via LiteLLM)."""
         logger.info(f"Initializing LightRAG in {self.lightrag_working_dir}")
+
+        # Get model names from environment (Azure preferred)
+        llm_model = os.getenv("LIGHTRAG_MODEL", "azure/gpt-5.1")
+        embed_model = os.getenv("LIGHTRAG_EMBED_MODEL", "azure/text-embedding-3-small")
 
         self.rag = LightRAG(
             working_dir=self.lightrag_working_dir,
             llm_model_func=lambda prompt, system_prompt=None, history_messages=[], **kwargs:
                 openai_complete_if_cache(
-                    "gpt-4o-mini",
+                    llm_model,
                     prompt,
                     system_prompt=system_prompt,
                     history_messages=history_messages,
@@ -94,14 +99,14 @@ class DeepLakeToLightRAGIncremental:
                 embedding_dim=1536,
                 func=lambda texts: openai_embed(
                     texts,
-                    model="text-embedding-ada-002",
+                    model=embed_model,
                     api_key=self.api_key
                 ),
             ),
             max_parallel_insert=2,  # Process 2 documents at a time
             llm_model_max_async=2,  # Reduced from 4 to minimize rate limiting
         )
-        logger.info("LightRAG initialized successfully")
+        logger.info(f"LightRAG initialized successfully (LLM: {llm_model}, Embed: {embed_model})")
 
     async def _initialize_lightrag_storages(self):
         """Initialize LightRAG storages asynchronously."""
@@ -356,7 +361,9 @@ class DeepLakeToLightRAGIncremental:
         print(f"📅 Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"📂 Source: {self.deeplake_path}")
         print(f"📁 Target: {self.lightrag_working_dir}")
-        print(f"🤖 Model: gpt-4o-mini (text-embedding-ada-002)")
+        llm_model = os.getenv("LIGHTRAG_MODEL", "azure/gpt-5.1")
+        embed_model = os.getenv("LIGHTRAG_EMBED_MODEL", "azure/text-embedding-3-small")
+        print(f"🤖 Model: {llm_model} ({embed_model})")
         print(f"✨ Mode: INCREMENTAL (skips duplicates via document IDs)")
         print(f"{'='*70}")
 

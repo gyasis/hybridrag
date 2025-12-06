@@ -59,15 +59,18 @@ class HybridLightRAGCore:
         logger.info(f"HybridLightRAGCore initialized with working dir: {self.config.working_dir}")
     
     def _setup_api_key(self):
-        """Setup OpenAI API key from config or environment."""
-        self.api_key = self.config.api_key or os.getenv("OPENAI_API_KEY")
+        """Setup API key from config or environment. Prefers Azure, falls back to OpenAI."""
+        # Try Azure first, then OpenAI
+        self.api_key = self.config.api_key or os.getenv("AZURE_API_KEY") or os.getenv("OPENAI_API_KEY")
         if not self.api_key:
             raise ValueError(
-                "OpenAI API key not found. Set OPENAI_API_KEY environment variable "
+                "API key not found. Set AZURE_API_KEY or OPENAI_API_KEY environment variable "
                 "or provide it in configuration."
             )
-        # Ensure the API key is set in environment
-        os.environ['OPENAI_API_KEY'] = self.api_key
+        # Set both env vars for compatibility with different libraries
+        if os.getenv("AZURE_API_KEY"):
+            os.environ['AZURE_API_KEY'] = self.api_key
+        os.environ['OPENAI_API_KEY'] = self.api_key  # LightRAG still uses this internally
     
     def _ensure_working_dir(self):
         """Ensure working directory exists."""

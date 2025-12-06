@@ -19,8 +19,9 @@ class LightRAGConfig:
     """LightRAG specific configuration."""
     working_dir: str = "./lightrag_db"
     api_key: Optional[str] = None
-    model_name: str = "gpt-4o-mini"
-    embedding_model: str = "text-embedding-3-small"
+    # Model names default from environment variables (Azure preferred)
+    model_name: str = field(default_factory=lambda: os.getenv("LIGHTRAG_MODEL", "azure/gpt-5.1"))
+    embedding_model: str = field(default_factory=lambda: os.getenv("LIGHTRAG_EMBED_MODEL", "azure/text-embedding-3-small"))
     embedding_dim: int = 1536
     max_async: int = 4
     enable_cache: bool = True
@@ -77,8 +78,9 @@ class HybridRAGConfig:
     def __post_init__(self):
         """Post-initialization setup."""
         # Set API key from environment if not provided
+        # Prefer Azure API key, fall back to OpenAI
         if not self.lightrag.api_key:
-            self.lightrag.api_key = os.getenv("OPENAI_API_KEY")
+            self.lightrag.api_key = os.getenv("AZURE_API_KEY") or os.getenv("OPENAI_API_KEY")
             
         # Convert relative paths to absolute
         self.lightrag.working_dir = str(self.system.project_root / self.lightrag.working_dir)

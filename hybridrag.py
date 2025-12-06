@@ -52,6 +52,41 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def get_api_key_for_model(model_name: str) -> Optional[str]:
+    """
+    Get the appropriate API key based on model provider prefix.
+
+    Supports: azure/, openai/, anthropic/, gemini/, ollama/
+    Falls back gracefully if specific key not found.
+    """
+    model_lower = model_name.lower()
+
+    # Determine provider from model prefix
+    if model_lower.startswith('azure/'):
+        key = os.getenv("AZURE_API_KEY")
+        if key:
+            return key
+        # Fall back to OpenAI key (LiteLLM uses it for Azure too)
+        return os.getenv("OPENAI_API_KEY")
+
+    elif model_lower.startswith('anthropic/') or model_lower.startswith('claude'):
+        return os.getenv("ANTHROPIC_API_KEY")
+
+    elif model_lower.startswith('gemini/') or model_lower.startswith('google/'):
+        return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+
+    elif model_lower.startswith('ollama/'):
+        # Ollama doesn't need an API key for local models
+        return "ollama-local"
+
+    elif model_lower.startswith('openai/') or not '/' in model_lower:
+        # OpenAI or bare model name defaults to OpenAI
+        return os.getenv("OPENAI_API_KEY")
+
+    # Generic fallback: try Azure first, then OpenAI
+    return os.getenv("AZURE_API_KEY") or os.getenv("OPENAI_API_KEY")
+
+
 class HybridRAGCLI:
     """Unified CLI for HybridRAG operations."""
 
@@ -60,6 +95,9 @@ class HybridRAGCLI:
         self.args = args
         self.config_path = args.config if hasattr(args, 'config') else None
         self.working_dir = args.working_dir if hasattr(args, 'working_dir') else "./lightrag_db"
+        # Model override support: CLI > env var > default
+        self.llm_model = args.model if hasattr(args, 'model') and args.model else os.getenv("LIGHTRAG_MODEL", "azure/gpt-5.1")
+        self.embed_model = args.embed_model if hasattr(args, 'embed_model') and args.embed_model else os.getenv("LIGHTRAG_EMBED_MODEL", "azure/text-embedding-3-small")
 
     async def run(self):
         """Execute the requested command."""
@@ -185,17 +223,30 @@ class HybridRAGCLI:
         from lightrag.llm.openai import openai_complete_if_cache, openai_embed
         from lightrag.utils import EmbeddingFunc
 
-        api_key = os.getenv("OPENAI_API_KEY")
+        # Get models from instance (CLI override or env vars)
+        llm_model = self.llm_model
+        embed_model = self.embed_model
+
+        # Get appropriate API key for the LLM model
+        api_key = get_api_key_for_model(llm_model)
         if not api_key:
-            print("❌ OPENAI_API_KEY not found")
+            print(f"❌ No API key found for model: {llm_model}")
+            print("   Set the appropriate env var: AZURE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.")
             return
+
+        # Get API key for embedding model (may be different provider)
+        embed_api_key = get_api_key_for_model(embed_model)
+        if not embed_api_key:
+            embed_api_key = api_key  # Fall back to LLM API key
+
+        print(f"   Using LLM: {llm_model}, Embed: {embed_model}")
 
         # Initialize LightRAG
         rag = LightRAG(
             working_dir=self.working_dir,
             llm_model_func=lambda prompt, system_prompt=None, history_messages=[], **kwargs:
                 openai_complete_if_cache(
-                    "gpt-4o-mini",
+                    llm_model,
                     prompt,
                     system_prompt=system_prompt,
                     history_messages=history_messages,
@@ -206,8 +257,8 @@ class HybridRAGCLI:
                 embedding_dim=1536,
                 func=lambda texts: openai_embed(
                     texts,
-                    model="text-embedding-ada-002",
-                    api_key=api_key
+                    model=embed_model,
+                    api_key=embed_api_key
                 ),
             ),
         )
@@ -238,17 +289,24 @@ class HybridRAGCLI:
         spec_rag = SpecStoryRAG(working_dir=self.working_dir)
         await spec_rag.initialize()
 
+        # Get agentic model: CLI override > AGENTIC_MODEL env > LLM model > default
+        agentic_model = self.llm_model  # Use the already resolved LLM model (respects --model flag)
+        if os.getenv("AGENTIC_MODEL"):
+            agentic_model = os.getenv("AGENTIC_MODEL")
+
+        print(f"   Using agentic model: {agentic_model}")
+
         # Create PromptChain with agentic reasoning
         if agentic:
             agentic_step = AgenticStepProcessor(
                 objective=f"Answer the query using LightRAG retrieval tools: {query_text}",
                 max_internal_steps=8,
-                model_name="openai/gpt-4o-mini",
+                model_name=agentic_model,
                 history_mode="progressive"
             )
 
             chain = PromptChain(
-                models=["openai/gpt-4o-mini"],
+                models=[agentic_model],
                 instructions=[agentic_step],
                 verbose=True
             )
@@ -682,9 +740,14 @@ Examples:
   # Interactive query mode
   python hybridrag.py interactive
 
-  # One-shot queries
+  # One-shot queries (default: Azure models from env)
   python hybridrag.py query --text "Find appointment tables" --mode hybrid
   python hybridrag.py query --text "..." --agentic
+
+  # Override model (supports azure/, openai/, anthropic/, gemini/, ollama/)
+  python hybridrag.py --model gemini/gemini-pro query --text "..."
+  python hybridrag.py --model anthropic/claude-opus query --text "..."
+  python hybridrag.py --model openai/gpt-4o query --text "..."
 
   # Ingestion
   python hybridrag.py ingest --folder ./data
@@ -701,6 +764,8 @@ Examples:
     # Global options
     parser.add_argument('--config', help='Config file path')
     parser.add_argument('--working-dir', default='./lightrag_db', help='LightRAG database directory')
+    parser.add_argument('--model', help='Override LLM model (e.g., azure/gpt-5.1, gemini/gemini-pro, anthropic/claude-opus)')
+    parser.add_argument('--embed-model', help='Override embedding model (e.g., azure/text-embedding-3-small)')
 
     # Subcommands
     subparsers = parser.add_subparsers(dest='command', help='Command to execute')

@@ -63,18 +63,23 @@ class FolderToLightRAG:
         self._init_lightrag()
 
     def _init_lightrag(self):
-        """Initialize LightRAG with OpenAI models."""
+        """Initialize LightRAG with Azure models (via LiteLLM)."""
         logger.info(f"Initializing LightRAG in {self.lightrag_working_dir}")
 
-        api_key = os.getenv("OPENAI_API_KEY")
+        # Prefer Azure API key, fall back to OpenAI
+        api_key = os.getenv("AZURE_API_KEY") or os.getenv("OPENAI_API_KEY")
         if not api_key:
-            raise ValueError("OPENAI_API_KEY not found in environment")
+            raise ValueError("AZURE_API_KEY or OPENAI_API_KEY not found in environment")
+
+        # Get model names from environment (Azure preferred)
+        llm_model = os.getenv("LIGHTRAG_MODEL", "azure/gpt-5.1")
+        embed_model = os.getenv("LIGHTRAG_EMBED_MODEL", "azure/text-embedding-3-small")
 
         self.rag = LightRAG(
             working_dir=self.lightrag_working_dir,
             llm_model_func=lambda prompt, system_prompt=None, history_messages=[], **kwargs:
                 openai_complete_if_cache(
-                    "gpt-4o-mini",
+                    llm_model,
                     prompt,
                     system_prompt=system_prompt,
                     history_messages=history_messages,
@@ -85,14 +90,14 @@ class FolderToLightRAG:
                 embedding_dim=1536,
                 func=lambda texts: openai_embed(
                     texts,
-                    model="text-embedding-ada-002",
+                    model=embed_model,
                     api_key=api_key
                 ),
             ),
             max_parallel_insert=2,  # Process 2 documents at a time
             llm_model_max_async=2,  # Reduced from 4 to minimize rate limiting
         )
-        logger.info("LightRAG initialized successfully")
+        logger.info(f"LightRAG initialized successfully (LLM: {llm_model}, Embed: {embed_model})")
 
     def collect_files(self) -> List[Path]:
         """Collect all files from source folder with matching extensions."""
