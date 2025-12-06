@@ -6,13 +6,16 @@
 # Use this when you need strict isolation between projects
 #
 # Usage:
-#   ./scripts/ingest_separate_databases.sh <parent_path>
+#   ./scripts/ingest_separate_databases.sh <parent_path> [model]
 #
 # Arguments:
 #   parent_path  - Parent directory to search for .specstory folders
+#   model        - LLM model override (optional)
+#                  Default: uses LIGHTRAG_MODEL env var or azure/gpt-5.1
 #
 # Examples:
 #   ./scripts/ingest_separate_databases.sh /home/gyasis/Documents/code
+#   ./scripts/ingest_separate_databases.sh /home/gyasis/Documents/code gemini/gemini-pro
 #
 # Output:
 #   Creates separate database directories:
@@ -32,6 +35,7 @@ set -o pipefail
 # =============================================================================
 
 PARENT_PATH="${1:-}"
+MODEL_OVERRIDE="${2:-}"
 HYBRIDRAG_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 TEMP_FILE="/tmp/specstory_separate_$$.txt"
 LOG_FILE="${HYBRIDRAG_DIR}/logs/separate_ingestion_$(date +%Y%m%d_%H%M%S).log"
@@ -107,6 +111,9 @@ print_header
 
 log "Starting separate database ingestion"
 log "Parent path: $PARENT_PATH"
+if [ -n "$MODEL_OVERRIDE" ]; then
+    log "Model override: $MODEL_OVERRIDE"
+fi
 
 echo -e "${GREEN}Searching for .specstory folders in:${NC}"
 echo -e "  ${CYAN}$PARENT_PATH${NC}"
@@ -181,8 +188,14 @@ while IFS= read -r folder; do
     # Ingest with custom database path
     # Note: --yes skips confirmation prompts, --quiet suppresses verbose output, </dev/null prevents stdin consumption
     # Use tee to show progress bar on screen while also logging, stderr goes to log only
+    # Build model flag if override specified
+    MODEL_FLAG=""
+    if [ -n "$MODEL_OVERRIDE" ]; then
+        MODEL_FLAG="--model $MODEL_OVERRIDE"
+    fi
+
     if LIGHTRAG_WORKING_DIR="$DB_PATH" \
-       python "$HYBRIDRAG_DIR/hybridrag.py" ingest \
+       python "$HYBRIDRAG_DIR/hybridrag.py" $MODEL_FLAG ingest \
        --folder "$folder" \
        --db-action fresh \
        --metadata "project=$PROJECT_NAME" \

@@ -6,12 +6,14 @@
 # Supports both unified database and separate database modes
 #
 # Usage:
-#   ./scripts/ingest_specstory_folders.sh <parent_path> [db_action]
+#   ./scripts/ingest_specstory_folders.sh <parent_path> [db_action] [model]
 #
 # Arguments:
 #   parent_path  - Parent directory to search for .specstory folders
 #   db_action    - 'fresh' (start new DB) or 'add' (append to existing)
 #                  Default: 'add'
+#   model        - LLM model override (optional)
+#                  Default: uses LIGHTRAG_MODEL env var or azure/gpt-5.1
 #
 # Examples:
 #   # Fresh ingestion (creates new database)
@@ -19,6 +21,9 @@
 #
 #   # Add to existing database
 #   ./scripts/ingest_specstory_folders.sh /home/gyasis/Documents/code add
+#
+#   # Use specific model (e.g., Gemini)
+#   ./scripts/ingest_specstory_folders.sh /home/gyasis/Documents/code fresh gemini/gemini-pro
 #
 #   # Process multiple paths into unified DB
 #   ./scripts/ingest_specstory_folders.sh /home/gyasis/Documents/code fresh
@@ -34,6 +39,7 @@ set -o pipefail  # Catch errors in pipes
 
 PARENT_PATH="${1:-}"
 DB_ACTION="${2:-add}"
+MODEL_OVERRIDE="${3:-}"
 HYBRIDRAG_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 TEMP_FILE="/tmp/specstory_paths_$$.txt"
 LOG_FILE="${HYBRIDRAG_DIR}/logs/ingestion_$(date +%Y%m%d_%H%M%S).log"
@@ -126,6 +132,9 @@ print_header
 log "Starting .specstory folder search and ingestion"
 log "Parent path: $PARENT_PATH"
 log "Database action: $DB_ACTION"
+if [ -n "$MODEL_OVERRIDE" ]; then
+    log "Model override: $MODEL_OVERRIDE"
+fi
 
 echo -e "${GREEN}Searching for .specstory folders in:${NC}"
 echo -e "  ${CYAN}$PARENT_PATH${NC}"
@@ -220,7 +229,13 @@ while IFS= read -r folder; do
     # Ingest with metadata tagging
     # Note: --yes skips confirmation prompts, </dev/null prevents stdin consumption
     # 2>&1 merges stderr into stdout so tqdm progress bars reach terminal AND log file
-    if python "$HYBRIDRAG_DIR/hybridrag.py" ingest \
+    # Build model flag if override specified
+    MODEL_FLAG=""
+    if [ -n "$MODEL_OVERRIDE" ]; then
+        MODEL_FLAG="--model $MODEL_OVERRIDE"
+    fi
+
+    if python "$HYBRIDRAG_DIR/hybridrag.py" $MODEL_FLAG ingest \
         --folder "$folder" \
         --db-action "$CURRENT_DB_ACTION" \
         --metadata "project=$PROJECT_NAME" \

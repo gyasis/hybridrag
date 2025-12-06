@@ -6,11 +6,13 @@
 # Uses inotify (Linux) or fswatch (macOS) for real-time file watching
 #
 # Usage:
-#   ./scripts/watch_specstory_folders.sh <parent_path> [interval]
+#   ./scripts/watch_specstory_folders.sh <parent_path> [interval] [model]
 #
 # Arguments:
 #   parent_path  - Parent directory containing projects with .specstory folders
 #   interval     - Check interval in seconds (default: 300 = 5 minutes)
+#   model        - LLM model override (optional)
+#                  Default: uses LIGHTRAG_MODEL env var or azure/gpt-5.1
 #
 # Examples:
 #   # Watch with default 5-minute interval
@@ -18,6 +20,9 @@
 #
 #   # Watch with 1-minute interval
 #   ./scripts/watch_specstory_folders.sh /home/gyasis/Documents/code 60
+#
+#   # Use specific model (e.g., Gemini)
+#   ./scripts/watch_specstory_folders.sh /home/gyasis/Documents/code 300 gemini/gemini-pro
 #
 #   # Run in background
 #   nohup ./scripts/watch_specstory_folders.sh /home/gyasis/Documents/code > watcher.log 2>&1 &
@@ -32,6 +37,7 @@ set -o pipefail
 
 PARENT_PATH="${1:-}"
 CHECK_INTERVAL="${2:-300}"  # 5 minutes default
+MODEL_OVERRIDE="${3:-}"
 HYBRIDRAG_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 LOCK_FILE="/tmp/hybridrag_watcher.lock"
 PID_FILE="/tmp/hybridrag_watcher.pid"
@@ -121,9 +127,15 @@ ingest_folder() {
 
     log "Ingesting changes from $project_name ($folder)"
 
+    # Build model flag if override specified
+    MODEL_FLAG=""
+    if [ -n "$MODEL_OVERRIDE" ]; then
+        MODEL_FLAG="--model $MODEL_OVERRIDE"
+    fi
+
     # Note: --yes skips confirmation prompts, --quiet suppresses verbose output, </dev/null prevents stdin consumption
     # Use tee to show progress bar on screen while also logging, stderr goes to log only
-    if python "$HYBRIDRAG_DIR/hybridrag.py" ingest \
+    if python "$HYBRIDRAG_DIR/hybridrag.py" $MODEL_FLAG ingest \
         --folder "$folder" \
         --db-action add \
         --metadata "project=$project_name" \
@@ -186,6 +198,9 @@ print_header
 log "Starting .specstory folder watcher"
 log "Parent path: $PARENT_PATH"
 log "Check interval: ${CHECK_INTERVAL}s ($(($CHECK_INTERVAL / 60)) minutes)"
+if [ -n "$MODEL_OVERRIDE" ]; then
+    log "Model override: $MODEL_OVERRIDE"
+fi
 log "PID: $$"
 
 echo -e "${GREEN}Searching for .specstory folders...${NC}"
