@@ -9,7 +9,6 @@ Collects and aggregates data from various sources:
 - Log files (recent activity)
 """
 
-import os
 import json
 import psutil
 from pathlib import Path
@@ -25,9 +24,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.database_registry import (
     DatabaseRegistry, DatabaseEntry,
-    get_registry, is_watcher_running, get_watcher_pid_file
+    get_registry, is_watcher_running
 )
-from src.watch_manager import WatchManager, WatcherStatus, WatcherMode
+from src.watch_manager import WatchManager
 
 
 @dataclass
@@ -147,31 +146,36 @@ def get_directory_size(path: Path) -> int:
 
 
 def parse_database_metadata(db_path: Path) -> Dict[str, int]:
-    """Parse database metadata for entity/relation counts."""
+    """Parse database metadata for entity/relation counts.
+
+    Uses fast methods first:
+    1. Parse log files for 'Loaded graph ... with X nodes, Y edges'
+    2. Count keys in kv_store JSON files (fast dict length)
+    3. Read graphml file only as last resort (can be 100MB+)
+    """
     counts = {"entities": 0, "relations": 0, "chunks": 0}
 
-    # Try to parse from graphml file first (most reliable)
-    graphml_file = db_path / "graph_chunk_entity_relation.graphml"
-    if graphml_file.exists():
+    # Method 1: Try to find counts in recent log files (fastest)
+    log_dir = Path(__file__).parent.parent.parent / "logs"
+    if log_dir.exists():
         try:
-            # Quick parse to extract node/edge counts from header
-            with open(graphml_file, 'r', encoding='utf-8') as f:
-                content = f.read(10000)  # Just read header
-                # Look for pattern in log: "Loaded graph ... with X nodes, Y edges"
-                # Or count <node> and <edge> tags in header
-                import re
-                node_matches = re.findall(r'<node\s', content)
-                edge_matches = re.findall(r'<edge\s', content)
-                if node_matches:
-                    # Estimate from sample - read full file count
-                    with open(graphml_file, 'r', encoding='utf-8') as f2:
-                        full_content = f2.read()
-                        counts["entities"] = full_content.count('<node ')
-                        counts["relations"] = full_content.count('<edge ')
-        except:
+            log_files = sorted(log_dir.glob("*.log"), key=lambda f: f.stat().st_mtime, reverse=True)
+            for log_file in log_files[:3]:  # Check 3 most recent logs
+                try:
+                    with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
+                        # Look for: "Loaded graph ... with 44990 nodes, 80123 edges"
+                        match = re.search(r'Loaded graph.*?with\s+(\d+)\s+nodes?,\s*(\d+)\s+edges?', content)
+                        if match:
+                            counts["entities"] = int(match.group(1))
+                            counts["relations"] = int(match.group(2))
+                            break
+                except (IOError, OSError, ValueError):
+                    pass
+        except (IOError, OSError):
             pass
 
-    # Fall back to kv_store files
+    # Method 2: Count keys in kv_store files (fast - just dict length)
     if counts["entities"] == 0:
         entities_file = db_path / "kv_store_full_entities.json"
         if entities_file.exists():
@@ -179,7 +183,7 @@ def parse_database_metadata(db_path: Path) -> Dict[str, int]:
                 with open(entities_file, 'r') as f:
                     data = json.load(f)
                     counts["entities"] = len(data) if isinstance(data, dict) else len(data)
-            except:
+            except (IOError, json.JSONDecodeError):
                 pass
 
     if counts["relations"] == 0:
@@ -189,7 +193,7 @@ def parse_database_metadata(db_path: Path) -> Dict[str, int]:
                 with open(relations_file, 'r') as f:
                     data = json.load(f)
                     counts["relations"] = len(data) if isinstance(data, dict) else len(data)
-            except:
+            except (IOError, json.JSONDecodeError):
                 pass
 
     if counts["chunks"] == 0:
@@ -199,20 +203,22 @@ def parse_database_metadata(db_path: Path) -> Dict[str, int]:
                 with open(chunks_file, 'r') as f:
                     data = json.load(f)
                     counts["chunks"] = len(data) if isinstance(data, dict) else len(data)
-            except:
+            except (IOError, json.JSONDecodeError):
                 pass
 
-    # Also try vdb files (vector database) for counts
+    # Method 3: Try graphml file ONLY if still no counts (slowest - avoid for large files)
     if counts["entities"] == 0:
-        vdb_file = db_path / "vdb_entities.json"
-        if vdb_file.exists():
+        graphml_file = db_path / "graph_chunk_entity_relation.graphml"
+        if graphml_file.exists():
             try:
-                with open(vdb_file, 'r') as f:
-                    # vdb files have __data__ key with list
-                    data = json.load(f)
-                    if "__data__" in data:
-                        counts["entities"] = len(data["__data__"].get("__data__", []))
-            except:
+                # Only read graphml for small files (under 10MB)
+                file_size = graphml_file.stat().st_size
+                if file_size < 10 * 1024 * 1024:  # 10MB limit
+                    with open(graphml_file, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                        counts["entities"] = content.count('<node ')
+                        counts["relations"] = content.count('<edge ')
+            except (IOError, OSError):
                 pass
 
     return counts
@@ -399,7 +405,7 @@ def get_recent_logs(
         # Specific database logs
         patterns = [
             f"watcher_{db_name}*.log",
-            f"ingestion_*.log"
+            "ingestion_*.log"
         ]
         for pattern in patterns:
             log_files.extend(log_dir.glob(pattern))
