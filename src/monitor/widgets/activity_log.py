@@ -70,9 +70,20 @@ class ActivityLog(RichLog):
         line = Text()
         line.append(f"[{timestamp}] ", style="dim")
         line.append(f"{entry.database}: ", style="cyan bold")
-        line.append(entry.message, style=style)
 
-        self.write(line)
+        # For errors, show full message with wrapping for debugging
+        if entry.level == "ERROR":
+            line.append(entry.message, style=style)
+            self.write(line)
+            # If there's a path in the raw message, show it on next line
+            if "/" in entry.raw and len(entry.raw) > 80:
+                detail_line = Text()
+                detail_line.append("           └─ ", style="dim")
+                detail_line.append(entry.raw[-100:] if len(entry.raw) > 100 else entry.raw, style="dim red")
+                self.write(detail_line)
+        else:
+            line.append(entry.message, style=style)
+            self.write(line)
 
     def update_entries(self, entries: list[LogEntry]) -> None:
         """Update with a list of log entries."""
