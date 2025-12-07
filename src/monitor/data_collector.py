@@ -148,47 +148,70 @@ def get_directory_size(path: Path) -> int:
 
 def parse_database_metadata(db_path: Path) -> Dict[str, int]:
     """Parse database metadata for entity/relation counts."""
-    metadata_file = db_path / "database_metadata.json"
     counts = {"entities": 0, "relations": 0, "chunks": 0}
 
-    if metadata_file.exists():
+    # Try to parse from graphml file first (most reliable)
+    graphml_file = db_path / "graph_chunk_entity_relation.graphml"
+    if graphml_file.exists():
         try:
-            with open(metadata_file, 'r') as f:
-                data = json.load(f)
-                counts["entities"] = data.get("entity_count", 0)
-                counts["relations"] = data.get("relation_count", 0)
-                counts["chunks"] = data.get("chunk_count", 0)
-        except (json.JSONDecodeError, OSError):
+            # Quick parse to extract node/edge counts from header
+            with open(graphml_file, 'r', encoding='utf-8') as f:
+                content = f.read(10000)  # Just read header
+                # Look for pattern in log: "Loaded graph ... with X nodes, Y edges"
+                # Or count <node> and <edge> tags in header
+                import re
+                node_matches = re.findall(r'<node\s', content)
+                edge_matches = re.findall(r'<edge\s', content)
+                if node_matches:
+                    # Estimate from sample - read full file count
+                    with open(graphml_file, 'r', encoding='utf-8') as f2:
+                        full_content = f2.read()
+                        counts["entities"] = full_content.count('<node ')
+                        counts["relations"] = full_content.count('<edge ')
+        except:
             pass
 
-    # Fall back to counting from JSON files
+    # Fall back to kv_store files
     if counts["entities"] == 0:
-        entities_file = db_path / "entities.json"
+        entities_file = db_path / "kv_store_full_entities.json"
         if entities_file.exists():
             try:
                 with open(entities_file, 'r') as f:
                     data = json.load(f)
-                    counts["entities"] = len(data) if isinstance(data, list) else len(data.keys())
+                    counts["entities"] = len(data) if isinstance(data, dict) else len(data)
             except:
                 pass
 
     if counts["relations"] == 0:
-        relations_file = db_path / "relationships.json"
+        relations_file = db_path / "kv_store_full_relations.json"
         if relations_file.exists():
             try:
                 with open(relations_file, 'r') as f:
                     data = json.load(f)
-                    counts["relations"] = len(data) if isinstance(data, list) else len(data.keys())
+                    counts["relations"] = len(data) if isinstance(data, dict) else len(data)
             except:
                 pass
 
     if counts["chunks"] == 0:
-        chunks_file = db_path / "text_chunks.json"
+        chunks_file = db_path / "kv_store_text_chunks.json"
         if chunks_file.exists():
             try:
                 with open(chunks_file, 'r') as f:
                     data = json.load(f)
-                    counts["chunks"] = len(data) if isinstance(data, list) else len(data.keys())
+                    counts["chunks"] = len(data) if isinstance(data, dict) else len(data)
+            except:
+                pass
+
+    # Also try vdb files (vector database) for counts
+    if counts["entities"] == 0:
+        vdb_file = db_path / "vdb_entities.json"
+        if vdb_file.exists():
+            try:
+                with open(vdb_file, 'r') as f:
+                    # vdb files have __data__ key with list
+                    data = json.load(f)
+                    if "__data__" in data:
+                        counts["entities"] = len(data["__data__"].get("__data__", []))
             except:
                 pass
 
@@ -280,9 +303,13 @@ def get_all_database_stats(registry: Optional[DatabaseRegistry] = None) -> List[
     return stats
 
 
-LOG_PATTERN = re.compile(
-    r'\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]\s*(.+)'
-)
+# Multiple log patterns to match different formats
+LOG_PATTERNS = [
+    # Format: [2025-12-06 17:24:11] message
+    re.compile(r'\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]\s*(.+)'),
+    # Format: 2025-12-06 17:23:47,421 - module - LEVEL - message
+    re.compile(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d+ - .+ - (INFO|WARNING|ERROR|DEBUG) - (.+)'),
+]
 
 def parse_log_line(line: str, default_db: str = "system") -> Optional[LogEntry]:
     """Parse a log line into a LogEntry."""
@@ -290,41 +317,65 @@ def parse_log_line(line: str, default_db: str = "system") -> Optional[LogEntry]:
     if not line:
         return None
 
-    match = LOG_PATTERN.match(line)
+    # Skip progress bar lines and ANSI escape sequences
+    if '\x1b[' in line or '█' in line or '|' in line and '%' in line:
+        return None
+
+    timestamp = None
+    message = None
+    level = "INFO"
+
+    # Try first pattern: [2025-12-06 17:24:11] message
+    match = LOG_PATTERNS[0].match(line)
     if match:
         timestamp_str, message = match.groups()
         try:
             timestamp = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
         except ValueError:
             timestamp = datetime.now()
+    else:
+        # Try second pattern: 2025-12-06 17:23:47,421 - module - LEVEL - message
+        match = LOG_PATTERNS[1].match(line)
+        if match:
+            timestamp_str, level_str, message = match.groups()
+            try:
+                timestamp = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                timestamp = datetime.now()
+            level = level_str
 
-        # Detect database from message
-        db_name = default_db
-        if ":" in message:
-            parts = message.split(":", 1)
-            if not " " in parts[0] and len(parts[0]) < 30:
-                db_name = parts[0].strip()
+    if not timestamp or not message:
+        return None
+
+    # Detect database from message
+    db_name = default_db
+    if ":" in message:
+        parts = message.split(":", 1)
+        # Check if first part looks like a database name (no spaces, reasonable length)
+        potential_db = parts[0].strip()
+        if potential_db and " " not in potential_db and len(potential_db) < 30:
+            # Skip common prefixes that aren't database names
+            skip_prefixes = ["SUCCESS", "FAILED", "INFO", "WARNING", "ERROR", "DEBUG", "src", "nano-vectordb"]
+            if potential_db not in skip_prefixes:
+                db_name = potential_db
                 message = parts[1].strip()
 
-        # Detect level
-        level = "INFO"
-        msg_lower = message.lower()
-        if "error" in msg_lower or "failed" in msg_lower or "✗" in message:
-            level = "ERROR"
-        elif "warning" in msg_lower or "⚠" in message:
-            level = "WARNING"
-        elif "success" in msg_lower or "✓" in message or "✅" in message:
-            level = "SUCCESS"
+    # Detect level from message content
+    msg_lower = message.lower()
+    if "error" in msg_lower or "failed" in msg_lower or "✗" in message:
+        level = "ERROR"
+    elif "warning" in msg_lower or "⚠" in message:
+        level = "WARNING"
+    elif "success" in msg_lower or "✓" in message or "✅" in message or "ingested" in msg_lower:
+        level = "SUCCESS"
 
-        return LogEntry(
-            timestamp=timestamp,
-            level=level,
-            database=db_name,
-            message=message,
-            raw=line
-        )
-
-    return None
+    return LogEntry(
+        timestamp=timestamp,
+        level=level,
+        database=db_name,
+        message=message,
+        raw=line
+    )
 
 
 def get_recent_logs(

@@ -69,9 +69,10 @@ class HistoryPanel(Static):
             if self.filter_database and entry.database != self.filter_database:
                 continue
 
-            # Only count file processing messages
+            # Count file processing and success messages
             msg_lower = entry.message.lower()
-            if not any(kw in msg_lower for kw in ["ingest", "processed", "added", "file", "chunk"]):
+            keywords = ["ingest", "processed", "added", "file", "chunk", "success", "complete", "found", "queued"]
+            if not any(kw in msg_lower for kw in keywords):
                 continue
 
             # Calculate which hour bucket (0 = current hour, 23 = 24 hours ago)
@@ -176,8 +177,9 @@ class HistoryPanel(Static):
 
         self.update(Panel(
             table,
-            border_style="blue",
-            title="📅 24-Hour Processing Timeline",
+            border_style="dim",
+            box=None,
+            title="24-Hour Processing Timeline",
             subtitle=f"[dim]{self.filter_database or 'All databases'} | ● active ○ idle[/dim]"
         ))
 

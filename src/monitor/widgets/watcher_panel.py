@@ -37,8 +37,9 @@ class WatcherPanel(Static):
         """Render panel when no database selected."""
         return Panel(
             Text("Select a database to view watcher details", style="dim italic"),
-            title="[bold]Watcher[/bold]",
-            border_style="dim"
+            title="Watcher",
+            border_style="dim",
+            box=None
         )
 
     def _render_watcher(self, db: DatabaseStats) -> Panel:
@@ -96,18 +97,11 @@ class WatcherPanel(Static):
         # Type
         table.add_row("Type:", db.source_type)
 
-        # Border style based on status
-        if db.watcher_running:
-            border_style = "green"
-        elif db.auto_watch:
-            border_style = "yellow"
-        else:
-            border_style = "dim"
-
         return Panel(
             table,
-            title=f"[bold]Watcher: {db.name}[/bold]",
-            border_style=border_style
+            title=f"Watcher: {db.name}",
+            border_style="dim",
+            box=None
         )
 
     def watch_database(self, database: DatabaseStats | None) -> None:

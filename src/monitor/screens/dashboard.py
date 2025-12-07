@@ -24,6 +24,7 @@ from src.monitor.widgets.activity_log import ActivityLog
 from src.monitor.widgets.action_panel import ActionPanel
 from src.monitor.widgets.status_bar import StatusBar
 from src.monitor.widgets.history_panel import HistoryPanel
+from src.monitor.widgets.source_files_panel import SourceFilesPanel
 
 
 class DashboardScreen(Screen):
@@ -70,7 +71,7 @@ class DashboardScreen(Screen):
 
     #header-row {
         height: 3;
-        background: $primary;
+        background: $surface;
         color: $text;
         padding: 0 2;
     }
@@ -92,12 +93,16 @@ class DashboardScreen(Screen):
 
     #middle-section {
         layout: grid;
-        grid-size: 2 1;
-        grid-columns: 1fr 1fr;
+        grid-size: 3 1;
+        grid-columns: 1fr 1fr 1fr;
         height: 100%;
     }
 
     #watcher-panel {
+        height: 100%;
+    }
+
+    #source-files-panel {
         height: 100%;
     }
 
@@ -128,7 +133,7 @@ class DashboardScreen(Screen):
 
     DatabaseTable {
         height: 100%;
-        border: solid $primary;
+        border: none;
     }
 
     WatcherPanel {
@@ -141,10 +146,14 @@ class DashboardScreen(Screen):
 
     ActivityLog {
         height: 100%;
-        border: solid $primary;
+        border: none;
     }
 
     HistoryPanel {
+        height: 100%;
+    }
+
+    SourceFilesPanel {
         height: 100%;
     }
 
@@ -176,9 +185,10 @@ class DashboardScreen(Screen):
                 id="database-section"
             ),
 
-            # Middle section: Watcher + Actions
+            # Middle section: Watcher + Source Files + Actions
             Horizontal(
                 WatcherPanel(id="watcher-panel"),
+                SourceFilesPanel(id="source-files-panel"),
                 ActionPanel(id="action-panel"),
                 id="middle-section"
             ),
@@ -241,6 +251,10 @@ class DashboardScreen(Screen):
         # Update watcher panel
         watcher_panel = self.query_one("#watcher-panel", WatcherPanel)
         watcher_panel.database = event.database
+
+        # Update source files panel
+        source_files_panel = self.query_one("#source-files-panel", SourceFilesPanel)
+        source_files_panel.database = event.database
 
         # Update action panel
         action_panel = self.query_one("#action-panel", ActionPanel)

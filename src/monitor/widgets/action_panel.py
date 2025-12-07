@@ -69,8 +69,9 @@ class ActionPanel(Static):
 
         return Panel(
             table,
-            title="[bold]Actions[/bold]",
-            border_style="blue"
+            title="Actions",
+            border_style="dim",
+            box=None
         )
 
     def watch_database(self, database: DatabaseStats | None) -> None:
