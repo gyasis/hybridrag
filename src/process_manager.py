@@ -458,9 +458,10 @@ class ProcessManager:
                             
                             if content:
                                 # Create document with metadata
+                                from src.utils import format_file_size
                                 doc_content = f"# Document: {file_info['path']}\n"
                                 doc_content += f"# Type: {file_info['extension']}\n"
-                                doc_content += f"# Size: {file_info['size']} bytes\n\n"
+                                doc_content += f"# Size: {format_file_size(file_info['size'])}\n\n"
                                 doc_content += content
                                 
                                 # Ingest into LightRAG with source file path

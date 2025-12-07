@@ -129,6 +129,127 @@ python hybridrag.py list-dbs                                  # List all databas
 python hybridrag.py --help                                    # Show help
 ```
 
+## 📚 Database Registry
+
+HybridRAG includes a centralized database registry for managing multiple knowledge bases. The registry stores database configurations in `~/.hybridrag/registry.yaml` and provides:
+
+- **Named database references** - Use `--db mydb` instead of `--working-dir /path/to/db`
+- **Source folder tracking** - Remember where data came from
+- **Auto-watch configuration** - Automatic file monitoring per database
+- **Model configuration** - Per-database model overrides
+
+### Registry Commands
+
+```bash
+# Register a new database
+python hybridrag.py db register specstory \
+    --path ~/databases/specstory_db \
+    --source ~/dev/jira-issues \
+    --type specstory \
+    --auto-watch \
+    --interval 300 \
+    --model azure/gpt-4o
+
+# List all registered databases
+python hybridrag.py db list
+python hybridrag.py db list --json
+
+# Show database details
+python hybridrag.py db show specstory
+
+# Update database settings
+python hybridrag.py db update specstory --auto-watch false --interval 600
+
+# Remove from registry (doesn't delete files)
+python hybridrag.py db unregister specstory
+
+# Force sync/re-ingest from source folder
+python hybridrag.py db sync specstory
+python hybridrag.py db sync specstory --fresh  # Start fresh
+```
+
+### Using Named Databases
+
+Once registered, reference databases by name with `--db`:
+
+```bash
+# Query using database name
+python hybridrag.py --db specstory query --text "TIC-4376 progress"
+
+# Ingest additional data
+python hybridrag.py --db specstory ingest --folder ~/more-data
+
+# Check status
+python hybridrag.py --db specstory status
+```
+
+### File Watching
+
+HybridRAG can automatically watch source folders and ingest new/changed files:
+
+```bash
+# Start watcher for a database
+python hybridrag.py db watch start specstory
+
+# Start watchers for ALL auto-watch databases
+python hybridrag.py db watch start --all
+
+# Stop watcher
+python hybridrag.py db watch stop specstory
+python hybridrag.py db watch stop --all
+
+# Check watcher status
+python hybridrag.py db watch status
+```
+
+#### Systemd Integration (Linux)
+
+For persistent watchers that survive reboots:
+
+```bash
+# Start with systemd (creates user service)
+python hybridrag.py db watch start specstory --systemd
+
+# Or manually install the template unit
+cp scripts/hybridrag-watcher@.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now hybridrag-watcher@specstory.service
+```
+
+### Database Types
+
+The registry supports different source types with type-specific configurations:
+
+| Type | Description | Config Options |
+|------|-------------|----------------|
+| `filesystem` | General files and folders | `extensions`, `recursive` |
+| `specstory` | SpecStory JIRA folders | `jira_project_key`, `folder_pattern` |
+| `api` | API data sources | `api_url`, `auth_method` |
+| `schema` | Database schema docs | `connection_string`, `tables` |
+
+Example SpecStory registration:
+```bash
+python hybridrag.py db register specstory \
+    --path ~/databases/specstory_db \
+    --source ~/dev/jira-issues \
+    --type specstory \
+    --jira-project TIC \
+    --auto-watch
+```
+
+### Registry Location
+
+Default: `~/.hybridrag/registry.yaml`
+
+Override with:
+```bash
+# Environment variable
+export HYBRIDRAG_CONFIG=/path/to/registry.yaml
+
+# Or pointer file
+echo "/path/to/registry.yaml" > ~/.hybridrag/config_pointer
+```
+
 ### Ingestion Flags
 
 | Flag | Description |
@@ -217,41 +338,42 @@ class SearchConfig:
 
 ## 📊 Query Modes
 
-### Local Mode
-Focus on specific entities and relationships:
-```python
-result = await search_interface.simple_search(
-    "machine learning algorithms", 
-    mode="local"
-)
+HybridRAG supports six query modes for different retrieval needs:
+
+| Mode | Type | Best For |
+|------|------|----------|
+| `local` | Native LightRAG | Specific entities, relationships |
+| `global` | Native LightRAG | Overviews, summaries, patterns |
+| `hybrid` | Native LightRAG | Balanced queries (default) |
+| `naive` | Native LightRAG | Simple vector similarity |
+| `mix` | Native LightRAG | Comprehensive coverage |
+| `multihop` | PromptChain | Complex analysis, comparisons |
+
+### Quick Examples
+
+```bash
+# Native LightRAG modes
+python hybridrag.py query --text "APPOINTMENT table" --mode local
+python hybridrag.py query --text "billing overview" --mode global
+python hybridrag.py query --text "patient flow" --mode hybrid
+
+# Multi-hop reasoning (uses LightRAG as tools)
+python hybridrag.py query --text "Compare registration and billing workflows" --multihop
+python hybridrag.py query --text "Trace patient data flow" --multihop --verbose
 ```
 
-### Global Mode  
-High-level overviews and summaries:
-```python
-result = await search_interface.simple_search(
-    "overview of AI technologies",
-    mode="global" 
-)
+### Interactive Mode
+
+```bash
+python hybridrag.py interactive
+
+> :local                  # Switch to local mode
+> :multihop               # Enable multi-hop reasoning
+> :verbose                # Show reasoning steps
+> Compare appointment and billing workflows
 ```
 
-### Hybrid Mode (Recommended)
-Combines local and global approaches:
-```python
-result = await search_interface.simple_search(
-    "deep learning applications",
-    mode="hybrid"
-)
-```
-
-### Agentic Mode
-Multi-hop reasoning with tool access:
-```python
-result = await search_interface.agentic_search(
-    "Compare machine learning and deep learning approaches",
-    max_steps=5
-)
-```
+**See [docs/QUERY_MODES.md](docs/QUERY_MODES.md) for comprehensive mode documentation.**
 
 ## 🔧 Advanced Features
 
@@ -293,10 +415,105 @@ ingestion_stats = ingestion_pipeline.get_stats()
 search_stats = search_interface.get_stats()
 ```
 
+## 🔌 MCP Server (Claude Desktop Integration)
+
+HybridRAG includes a Model Context Protocol (MCP) server for seamless integration with Claude Desktop. This allows Claude to directly query your knowledge bases.
+
+### Quick Setup
+
+1. **Find your Claude Desktop config** (typically `~/.claude_desktop/config.json`)
+
+2. **Add HybridRAG server(s)**:
+```json
+{
+  "mcpServers": {
+    "hybridrag-notes": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/path/to/hybridrag",
+        "run",
+        "python",
+        "-m",
+        "hybridrag_mcp"
+      ],
+      "env": {
+        "HYBRIDRAG_DATABASE": "/path/to/notes_lightrag_db"
+      }
+    }
+  }
+}
+```
+
+3. **Restart Claude Desktop** to load the new server
+
+### Multiple Instances
+
+Run multiple HybridRAG instances for different knowledge bases:
+
+```json
+{
+  "mcpServers": {
+    "hybridrag-notes": {
+      "command": "uv",
+      "args": ["--directory", "/path/to/hybridrag", "run", "python", "-m", "hybridrag_mcp"],
+      "env": { "HYBRIDRAG_DATABASE": "/path/to/notes_lightrag_db" }
+    },
+    "hybridrag-code": {
+      "command": "uv",
+      "args": ["--directory", "/path/to/hybridrag", "run", "python", "-m", "hybridrag_mcp"],
+      "env": {
+        "HYBRIDRAG_DATABASE": "/path/to/code_lightrag_db",
+        "HYBRIDRAG_MODEL": "azure/gpt-4o"
+      }
+    },
+    "hybridrag-specstory": {
+      "command": "uv",
+      "args": ["--directory", "/path/to/hybridrag", "run", "python", "-m", "hybridrag_mcp"],
+      "env": {
+        "HYBRIDRAG_DATABASE": "/path/to/specstory_lightrag_db",
+        "AZURE_API_KEY": "${AZURE_API_KEY}",
+        "AZURE_API_BASE": "${AZURE_API_BASE}"
+      }
+    }
+  }
+}
+```
+
+### Available MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `hybridrag_query` | Main query with mode selection (local/global/hybrid/naive/mix) |
+| `hybridrag_local_query` | Entity-focused retrieval for specific entities |
+| `hybridrag_global_query` | Community-based summaries and overviews |
+| `hybridrag_hybrid_query` | Combined local + global (recommended default) |
+| `hybridrag_multihop_query` | Multi-hop reasoning for complex analysis |
+| `hybridrag_extract_context` | Raw context extraction without LLM generation |
+| `hybridrag_database_status` | Get database stats and configuration |
+| `hybridrag_health_check` | Verify system health |
+
+### Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `HYBRIDRAG_DATABASE` | **Required.** Path to the LightRAG database directory |
+| `HYBRIDRAG_MODEL` | Optional LLM model override (e.g., `azure/gpt-4o`) |
+| `HYBRIDRAG_EMBED_MODEL` | Optional embedding model override |
+
+### Example Config
+
+See `hybridrag_mcp/claude_desktop_config.example.json` for a complete multi-instance example.
+
 ## 📁 Project Structure
 
 ```
 hybridrag/
+├── hybridrag_mcp/            # MCP server for Claude Desktop
+│   ├── __init__.py           # Module metadata
+│   ├── __main__.py           # Entry point for python -m
+│   ├── server.py             # MCP server implementation
+│   └── claude_desktop_config.example.json
 ├── src/                      # Core system components
 │   ├── folder_watcher.py      # File monitoring system
 │   ├── ingestion_pipeline.py  # Document processing

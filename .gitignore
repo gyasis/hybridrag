@@ -67,8 +67,9 @@ specstory_lightrag_db.old_md5_version/
 legacy/
 experiments/
 
-# Docs folder (keep root README only)
-docs/
+# Docs folder (keep root README and user-stories)
+docs/*
+!docs/user-stories/
 
 # Data and examples (not tracked)
 data/

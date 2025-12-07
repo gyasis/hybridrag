@@ -6,7 +6,7 @@ authors = [
     {name = "HybridRAG Team"}
 ]
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = {text = "MIT"}
 
 dependencies = [
@@ -22,6 +22,8 @@ dependencies = [
     # PromptChain for query interface
     "promptchain",
     "litellm>=1.0.0",
+    # MCP server for Claude Desktop integration
+    "fastmcp>=0.1.0",
 ]
 
 [project.optional-dependencies]

@@ -168,9 +168,10 @@ class FolderWatcher:
             
         # Check file size
         try:
+            from src.utils import format_file_size
             file_size = file_path.stat().st_size
             if file_size > self.max_file_size:
-                logger.warning(f"File too large: {file_path} ({file_size} bytes)")
+                logger.warning(f"File too large: {file_path} ({format_file_size(file_size)})")
                 return False
         except Exception as e:
             logger.error(f"Error checking file {file_path}: {e}")

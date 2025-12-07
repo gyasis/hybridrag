@@ -1,0 +1,50 @@
+# HybridRAG Watcher Systemd Template Unit
+# =========================================
+#
+# This is a systemd template unit file for running HybridRAG watchers as services.
+# The %i parameter is replaced with the database name.
+#
+# Installation:
+#   1. Copy to ~/.config/systemd/user/
+#   2. Update paths in ExecStart to match your installation
+#   3. Run: systemctl --user daemon-reload
+#
+# Usage:
+#   systemctl --user start hybridrag-watcher@specstory.service
+#   systemctl --user enable hybridrag-watcher@specstory.service
+#   systemctl --user status hybridrag-watcher@specstory.service
+#
+# Or use the CLI:
+#   python hybridrag.py db watch start specstory --systemd
+#
+
+[Unit]
+Description=HybridRAG Watcher for %i
+Documentation=https://github.com/gyasis/hybridrag
+After=network.target
+
+[Service]
+Type=simple
+# Update this path to your HybridRAG installation
+ExecStart=/home/gyasisutton/dev/tools/RAG/hybridrag/.venv/bin/python /home/gyasisutton/dev/tools/RAG/hybridrag/scripts/hybridrag-watcher.py %i
+WorkingDirectory=/home/gyasisutton/dev/tools/RAG/hybridrag
+
+# Restart policy
+Restart=on-failure
+RestartSec=10
+
+# Environment
+Environment="PYTHONUNBUFFERED=1"
+Environment="HOME=%h"
+
+# Resource limits (optional, adjust as needed)
+# MemoryMax=512M
+# CPUQuota=50%
+
+# Security (optional hardening)
+# NoNewPrivileges=true
+# ProtectSystem=strict
+# ProtectHome=read-only
+
+[Install]
+WantedBy=default.target

@@ -4,6 +4,7 @@ LightRAG Core Module
 ===================
 Core LightRAG functionality for the hybrid RAG system.
 Based on athena-lightrag patterns.
+Uses LiteLLM for provider-agnostic model access (Azure, OpenAI, Anthropic, etc.)
 """
 
 import os
@@ -13,8 +14,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Literal, Union, Any
 from dataclasses import dataclass
 from lightrag import LightRAG, QueryParam
-from lightrag.llm.openai import openai_complete_if_cache, openai_embed
 from lightrag.utils import EmbeddingFunc
+import litellm
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -59,18 +60,41 @@ class HybridLightRAGCore:
         logger.info(f"HybridLightRAGCore initialized with working dir: {self.config.working_dir}")
     
     def _setup_api_key(self):
-        """Setup API key from config or environment. Prefers Azure, falls back to OpenAI."""
-        # Try Azure first, then OpenAI
-        self.api_key = self.config.api_key or os.getenv("AZURE_API_KEY") or os.getenv("OPENAI_API_KEY")
+        """Setup API key and configure LiteLLM for Azure/OpenAI."""
+        # Get API key from config or environment
+        self.api_key = self.config.api_key or os.getenv("AZURE_API_KEY") or os.getenv("AZURE_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
         if not self.api_key:
             raise ValueError(
-                "API key not found. Set AZURE_API_KEY or OPENAI_API_KEY environment variable "
-                "or provide it in configuration."
+                "API key not found. Set AZURE_API_KEY, AZURE_OPENAI_API_KEY, or OPENAI_API_KEY "
+                "environment variable or provide it in configuration."
             )
-        # Set both env vars for compatibility with different libraries
-        if os.getenv("AZURE_API_KEY"):
-            os.environ['AZURE_API_KEY'] = self.api_key
-        os.environ['OPENAI_API_KEY'] = self.api_key  # LightRAG still uses this internally
+
+        # Detect if using Azure based on model name or environment
+        self.is_azure = (
+            self.config.model_name.startswith("azure/") or
+            self.config.embedding_model.startswith("azure/") or
+            os.getenv("AZURE_API_BASE") is not None or
+            os.getenv("AZURE_OPENAI_ENDPOINT") is not None
+        )
+
+        # Store Azure-specific configuration for LiteLLM calls
+        # Priority: AZURE_API_BASE > AZURE_OPENAI_ENDPOINT
+        self.azure_api_base = os.getenv("AZURE_API_BASE") or os.getenv("AZURE_OPENAI_ENDPOINT")
+        self.azure_api_version = os.getenv("AZURE_API_VERSION", "2024-02-01")
+
+        # Configure LiteLLM for Azure if needed
+        if self.is_azure:
+            if self.azure_api_base:
+                # Set LiteLLM Azure configuration via environment
+                os.environ['AZURE_API_KEY'] = self.api_key
+                os.environ['AZURE_API_BASE'] = self.azure_api_base
+                os.environ['AZURE_API_VERSION'] = self.azure_api_version
+                logger.info(f"Configured LiteLLM for Azure OpenAI: {self.azure_api_base} (version: {self.azure_api_version})")
+            else:
+                logger.warning("Azure model detected but no AZURE_API_BASE or AZURE_OPENAI_ENDPOINT set")
+        else:
+            # Only set OPENAI_API_KEY for non-Azure configurations
+            os.environ['OPENAI_API_KEY'] = self.api_key
     
     def _ensure_working_dir(self):
         """Ensure working directory exists."""
@@ -79,46 +103,88 @@ class HybridLightRAGCore:
         logger.info(f"Working directory ready: {working_dir}")
     
     def _init_lightrag(self):
-        """Initialize LightRAG instance with validated patterns."""
-        logger.info("Initializing LightRAG instance")
-        
-        # LLM model function using validated openai_complete_if_cache pattern
-        def llm_model_func(
-            prompt: str, 
-            system_prompt: Optional[str] = None, 
+        """Initialize LightRAG instance with LiteLLM for provider-agnostic access."""
+        logger.info("Initializing LightRAG instance with LiteLLM")
+
+        # Known LiteLLM-compatible kwargs (filter out LightRAG internal objects)
+        LITELLM_ALLOWED_KWARGS = {
+            'temperature', 'top_p', 'max_tokens', 'n', 'stream', 'stop',
+            'presence_penalty', 'frequency_penalty', 'logit_bias', 'user',
+            'response_format', 'seed', 'tools', 'tool_choice', 'timeout'
+        }
+
+        # LLM model function using LiteLLM for provider-agnostic access
+        async def llm_model_func(
+            prompt: str,
+            system_prompt: Optional[str] = None,
             history_messages: Optional[List[Dict[str, str]]] = None,
             **kwargs
         ) -> str:
-            # Filter out None values and unsupported parameters
-            call_kwargs = {
-                "model": self.config.model_name,
-                "prompt": prompt,
-                "api_key": self.api_key
-            }
-            
+            """LiteLLM-based completion function for Azure/OpenAI/Anthropic/etc."""
+            messages = []
+
+            # Add system prompt if provided
             if system_prompt:
-                call_kwargs["system_prompt"] = system_prompt
-                
-            # Only pass history_messages if it's not None and not empty
+                messages.append({"role": "system", "content": system_prompt})
+
+            # Add history messages if provided
             if history_messages:
-                call_kwargs["history_messages"] = history_messages
-                
-            # Add any other supported kwargs
-            for key, value in kwargs.items():
-                if key not in ['history_messages'] and value is not None:
-                    call_kwargs[key] = value
-            
-            return openai_complete_if_cache(**call_kwargs)
-        
-        # Embedding function using validated openai_embed pattern
-        def embedding_func(texts: List[str]) -> List[List[float]]:
-            return openai_embed(
-                texts=texts,
-                model=self.config.embedding_model,
-                api_key=self.api_key
-            )
-        
-        # Initialize LightRAG with validated configuration
+                messages.extend(history_messages)
+
+            # Add the user prompt
+            messages.append({"role": "user", "content": prompt})
+
+            # Filter kwargs to only include LiteLLM-compatible parameters
+            # This excludes LightRAG internal objects like JsonKVStorage
+            filtered_kwargs = {
+                k: v for k, v in kwargs.items()
+                if k in LITELLM_ALLOWED_KWARGS and v is not None
+            }
+
+            try:
+                # Build LiteLLM call kwargs
+                litellm_kwargs = {
+                    "model": self.config.model_name,
+                    "messages": messages,
+                    "api_key": self.api_key,
+                    **filtered_kwargs
+                }
+
+                # Add Azure-specific parameters if using Azure
+                if self.is_azure and self.azure_api_base:
+                    litellm_kwargs["api_base"] = self.azure_api_base
+                    litellm_kwargs["api_version"] = self.azure_api_version
+
+                # Use LiteLLM for provider-agnostic completion
+                response = await litellm.acompletion(**litellm_kwargs)
+                return response.choices[0].message.content
+            except Exception as e:
+                logger.error(f"LiteLLM completion error: {e}")
+                raise
+
+        # Embedding function using LiteLLM for provider-agnostic embeddings
+        async def embedding_func(texts: List[str]) -> List[List[float]]:
+            """LiteLLM-based embedding function for Azure/OpenAI/etc."""
+            try:
+                # Build LiteLLM embedding call kwargs
+                litellm_kwargs = {
+                    "model": self.config.embedding_model,
+                    "input": texts,
+                    "api_key": self.api_key
+                }
+
+                # Add Azure-specific parameters if embedding model uses Azure
+                if self.config.embedding_model.startswith("azure/") and self.azure_api_base:
+                    litellm_kwargs["api_base"] = self.azure_api_base
+                    litellm_kwargs["api_version"] = self.azure_api_version
+
+                response = await litellm.aembedding(**litellm_kwargs)
+                return [item["embedding"] for item in response.data]
+            except Exception as e:
+                logger.error(f"LiteLLM embedding error: {e}")
+                raise
+
+        # Initialize LightRAG with LiteLLM functions
         self.rag = LightRAG(
             working_dir=self.config.working_dir,
             llm_model_func=llm_model_func,
@@ -128,7 +194,7 @@ class HybridLightRAGCore:
                 func=embedding_func
             )
         )
-        logger.info("LightRAG initialized successfully")
+        logger.info(f"LightRAG initialized with LiteLLM (model: {self.config.model_name})")
     
     async def _ensure_initialized(self):
         """Ensure LightRAG storages are initialized."""
@@ -336,11 +402,12 @@ class HybridLightRAGCore:
             stats["graph_files"] = len(graph_files)
             
             # Get storage sizes
+            from src.utils import format_file_size
             storage_info = {}
             for file_path in graph_files:
                 try:
                     size = file_path.stat().st_size
-                    storage_info[file_path.name] = f"{size / 1024:.1f} KB"
+                    storage_info[file_path.name] = format_file_size(size)
                 except Exception:
                     storage_info[file_path.name] = "unknown"
             stats["storage_info"] = storage_info

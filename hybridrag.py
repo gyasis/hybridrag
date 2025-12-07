@@ -44,6 +44,14 @@ load_dotenv()
 # Import metadata manager
 from src.database_metadata import DatabaseMetadata, list_all_databases
 
+# Import database registry
+from src.database_registry import (
+    DatabaseRegistry, DatabaseEntry, SourceType,
+    get_registry, resolve_database, get_config_for_script,
+    register_specstory_database, register_schema_database,
+    get_watcher_pid_file, is_watcher_running
+)
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -94,9 +102,32 @@ class HybridRAGCLI:
         """Initialize CLI with parsed arguments."""
         self.args = args
         self.config_path = args.config if hasattr(args, 'config') else None
-        self.working_dir = args.working_dir if hasattr(args, 'working_dir') else "./lightrag_db"
-        # Model override support: CLI > env var > default
-        self.llm_model = args.model if hasattr(args, 'model') and args.model else os.getenv("LIGHTRAG_MODEL", "azure/gpt-5.1")
+
+        # Handle --db flag for named database references
+        self._db_entry = None
+        db_name = getattr(args, 'db', None)
+
+        if db_name:
+            # Look up database by name in registry
+            working_dir, db_entry = resolve_database(db_name)
+            if db_entry:
+                self._db_entry = db_entry
+                self.working_dir = db_entry.path
+                # Use database's model if set and no CLI override
+                cli_model = getattr(args, 'model', None)
+                if not cli_model and db_entry.model:
+                    self.llm_model = db_entry.model
+                else:
+                    self.llm_model = cli_model if cli_model else os.getenv("LIGHTRAG_MODEL", "azure/gpt-5.1")
+            else:
+                # Treat as path fallback
+                self.working_dir = working_dir
+                self.llm_model = args.model if hasattr(args, 'model') and args.model else os.getenv("LIGHTRAG_MODEL", "azure/gpt-5.1")
+        else:
+            self.working_dir = args.working_dir if hasattr(args, 'working_dir') else "./lightrag_db"
+            # Model override support: CLI > env var > default
+            self.llm_model = args.model if hasattr(args, 'model') and args.model else os.getenv("LIGHTRAG_MODEL", "azure/gpt-5.1")
+
         self.embed_model = args.embed_model if hasattr(args, 'embed_model') and args.embed_model else os.getenv("LIGHTRAG_EMBED_MODEL", "azure/text-embedding-3-small")
 
     async def run(self):
@@ -117,6 +148,8 @@ class HybridRAGCLI:
             await self.list_databases()
         elif command == 'db-info':
             await self.show_database_info()
+        elif command == 'db':
+            await self.run_db_command()
         else:
             print(f"❌ Unknown command: {command}")
             return 1
@@ -135,31 +168,54 @@ class HybridRAGCLI:
 
         mode = self.args.mode
         use_agentic = self.args.agentic
+        use_multihop = self.args.multihop if hasattr(self.args, 'multihop') else False
         use_promptchain = self.args.use_promptchain
+        verbose = self.args.verbose if hasattr(self.args, 'verbose') else False
 
         print(f"🔍 Query: {self.args.text}")
-        print(f"   Mode: {mode}, Agentic: {use_agentic}, PromptChain: {use_promptchain}")
+        print(f"   Mode: {mode}, Multihop: {use_multihop}, Agentic: {use_agentic}, PromptChain: {use_promptchain}")
 
-        if use_promptchain:
+        if use_multihop:
+            await self._query_with_multihop(self.args.text, verbose)
+        elif use_promptchain:
             await self._query_with_promptchain(self.args.text, mode, use_agentic)
         else:
             await self._query_with_lightrag(self.args.text, mode, use_agentic)
 
     async def run_interactive(self):
-        """Run interactive query interface."""
+        """Run interactive query interface with retrieval."""
+        from src.lightrag_core import HybridLightRAGCore
+        from config.config import HybridRAGConfig
+
         print("\n" + "="*70)
         print("🔍 HybridRAG Interactive Query Interface")
         print("="*70)
 
-        # Import the interactive demo
-        from lightrag_query_demo import LightRAGQueryInterface
+        # Initialize core with working directory
+        config = HybridRAGConfig()
+        config.lightrag.working_dir = self.working_dir
+        config.lightrag.model_name = self.llm_model
+        config.lightrag.embedding_model = self.embed_model
 
-        interface = LightRAGQueryInterface(working_dir=self.working_dir)
-        await interface._ensure_initialized()
+        print(f"\n   Database: {self.working_dir}")
+        print(f"   LLM: {self.llm_model}")
+        print(f"   Embed: {self.embed_model}")
+        print("\n   Initializing...")
+
+        core = HybridLightRAGCore(config)
+        await core._ensure_initialized()
+
+        # Initialize agentic RAG for multi-hop (lazy loaded)
+        agentic_rag = None
+
+        print("   Ready!")
 
         print("\nCommands:")
         print("  :local, :global, :hybrid, :naive, :mix  - Switch query mode")
-        print("  :context                                - Show context only")
+        print("  :multihop                               - Multi-hop reasoning mode")
+        print("  :context                                - Toggle context-only mode")
+        print("  :verbose                                - Toggle verbose mode")
+        print("  :stats                                  - Show database stats")
         print("  :help                                   - Show help")
         print("  :quit                                   - Exit")
         print("\nOr just type your query directly!")
@@ -167,10 +223,16 @@ class HybridRAGCLI:
 
         current_mode = "hybrid"
         context_only = False
+        verbose_mode = False
+        multihop_mode = False
 
         while True:
             try:
-                user_input = input(f"\n[{current_mode}]> ").strip()
+                if multihop_mode:
+                    mode_indicator = "multihop"
+                else:
+                    mode_indicator = f"{current_mode}" + (" ctx" if context_only else "")
+                user_input = input(f"\n[{mode_indicator}]> ").strip()
 
                 if not user_input:
                     continue
@@ -184,11 +246,36 @@ class HybridRAGCLI:
                         break
                     elif cmd in ['local', 'global', 'hybrid', 'naive', 'mix']:
                         current_mode = cmd
+                        multihop_mode = False
                         print(f"✅ Switched to {current_mode} mode")
+                        continue
+                    elif cmd == 'multihop':
+                        multihop_mode = not multihop_mode
+                        if multihop_mode:
+                            print("✅ Multi-hop reasoning enabled (uses LightRAG tools with AgenticStepProcessor)")
+                            print("   The system will perform multi-step reasoning to answer complex queries.")
+                        else:
+                            print(f"❌ Multi-hop disabled, back to {current_mode} mode")
                         continue
                     elif cmd == 'context':
                         context_only = not context_only
                         print(f"{'✅ Context-only' if context_only else '❌ Full response'} mode")
+                        continue
+                    elif cmd == 'verbose':
+                        verbose_mode = not verbose_mode
+                        print(f"{'✅ Verbose' if verbose_mode else '❌ Quiet'} mode")
+                        continue
+                    elif cmd == 'stats':
+                        stats = core.get_stats()
+                        print("\n📊 Database Stats:")
+                        print(f"   Working Dir: {stats.get('working_directory', 'N/A')}")
+                        print(f"   Initialized: {stats.get('initialized', 'N/A')}")
+                        print(f"   Model: {stats.get('model_name', 'N/A')}")
+                        print(f"   Graph Files: {stats.get('graph_files', 'N/A')}")
+                        if stats.get('storage_info'):
+                            print("   Storage:")
+                            for name, size in stats['storage_info'].items():
+                                print(f"     {name}: {size}")
                         continue
                     elif cmd == 'help':
                         self._print_help()
@@ -197,17 +284,78 @@ class HybridRAGCLI:
                         print(f"❌ Unknown command: {cmd}")
                         continue
 
-                # Execute query
-                result = await interface.query(
-                    user_input,
-                    mode=current_mode,
-                    only_need_context=context_only
-                )
+                # Execute query based on mode
+                if multihop_mode:
+                    # Multi-hop reasoning using AgenticHybridRAG
+                    print("🧠 Multi-hop reasoning...")
 
-                print(f"\n{'📚 Context:' if context_only else '💡 Response:'}")
-                print("-" * 70)
-                print(result)
-                print("-" * 70)
+                    # Lazy initialize agentic RAG
+                    if agentic_rag is None:
+                        try:
+                            from src.agentic_rag import create_agentic_rag
+                            agentic_rag = create_agentic_rag(
+                                lightrag_core=core,
+                                model_name=self.llm_model,
+                                max_internal_steps=8,
+                                verbose=verbose_mode
+                            )
+                            print("   Initialized AgenticHybridRAG")
+                        except ImportError as e:
+                            print(f"❌ Multi-hop requires PromptChain: {e}")
+                            print("   Install with: pip install git+https://github.com/gyasis/PromptChain.git")
+                            continue
+                        except Exception as e:
+                            print(f"❌ Failed to initialize multi-hop: {e}")
+                            continue
+
+                    # Update verbose mode if changed
+                    if agentic_rag:
+                        agentic_rag.verbose = verbose_mode
+                        agentic_rag.tools_provider.verbose = verbose_mode
+
+                    # Execute multi-hop reasoning
+                    result = await agentic_rag.execute_multi_hop_reasoning(
+                        query=user_input,
+                        timeout_seconds=300.0
+                    )
+
+                    # Display results
+                    if result.get('success'):
+                        print(f"\n💡 Response:")
+                        print("-" * 70)
+                        print(result.get('result', 'No result'))
+                        print("-" * 70)
+
+                        # Show reasoning steps if verbose
+                        if verbose_mode and result.get('reasoning_steps'):
+                            print("\n🔍 Reasoning Steps:")
+                            for i, step in enumerate(result['reasoning_steps'], 1):
+                                print(f"   {i}. {step}")
+
+                        print(f"\n⏱️  {result.get('execution_time', 0):.2f}s | Steps: {len(result.get('reasoning_steps', []))} | Contexts: {len(result.get('accumulated_contexts', []))}")
+                    else:
+                        print(f"\n❌ Multi-hop failed: {result.get('error', 'Unknown error')}")
+                        if result.get('reasoning_steps'):
+                            print("\n🔍 Partial reasoning steps:")
+                            for i, step in enumerate(result['reasoning_steps'], 1):
+                                print(f"   {i}. {step}")
+
+                else:
+                    # Standard LightRAG query
+                    print("🔍 Searching...")
+                    result = await core.aquery(
+                        user_input,
+                        mode=current_mode,
+                        only_need_context=context_only
+                    )
+
+                    print(f"\n{'📚 Context:' if context_only else '💡 Response:'}")
+                    print("-" * 70)
+                    # Result is a QueryResult dataclass, access .result for the text
+                    print(result.result if hasattr(result, 'result') else result)
+                    print("-" * 70)
+                    if hasattr(result, 'execution_time'):
+                        print(f"⏱️  {result.execution_time:.2f}s | Mode: {result.mode}")
 
             except KeyboardInterrupt:
                 print("\n👋 Goodbye!")
@@ -216,65 +364,100 @@ class HybridRAGCLI:
                 break
             except Exception as e:
                 print(f"❌ Error: {e}")
+                import traceback
+                traceback.print_exc()
 
     async def _query_with_lightrag(self, query_text: str, mode: str, agentic: bool):
-        """Execute query using LightRAG directly."""
-        from lightrag import LightRAG, QueryParam
-        from lightrag.llm.openai import openai_complete_if_cache, openai_embed
-        from lightrag.utils import EmbeddingFunc
+        """Execute query using LightRAG with LiteLLM integration."""
+        from src.lightrag_core import HybridLightRAGCore
+        from config.config import HybridRAGConfig
 
-        # Get models from instance (CLI override or env vars)
-        llm_model = self.llm_model
-        embed_model = self.embed_model
+        # Initialize config with CLI overrides
+        config = HybridRAGConfig()
+        config.lightrag.working_dir = self.working_dir
+        config.lightrag.model_name = self.llm_model
+        config.lightrag.embedding_model = self.embed_model
 
-        # Get appropriate API key for the LLM model
-        api_key = get_api_key_for_model(llm_model)
-        if not api_key:
-            print(f"❌ No API key found for model: {llm_model}")
-            print("   Set the appropriate env var: AZURE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.")
-            return
+        print(f"   Using LLM: {self.llm_model}, Embed: {self.embed_model}")
 
-        # Get API key for embedding model (may be different provider)
-        embed_api_key = get_api_key_for_model(embed_model)
-        if not embed_api_key:
-            embed_api_key = api_key  # Fall back to LLM API key
-
-        print(f"   Using LLM: {llm_model}, Embed: {embed_model}")
-
-        # Initialize LightRAG
-        rag = LightRAG(
-            working_dir=self.working_dir,
-            llm_model_func=lambda prompt, system_prompt=None, history_messages=[], **kwargs:
-                openai_complete_if_cache(
-                    llm_model,
-                    prompt,
-                    system_prompt=system_prompt,
-                    history_messages=history_messages,
-                    api_key=api_key,
-                    **kwargs
-                ),
-            embedding_func=EmbeddingFunc(
-                embedding_dim=1536,
-                func=lambda texts: openai_embed(
-                    texts,
-                    model=embed_model,
-                    api_key=embed_api_key
-                ),
-            ),
-        )
-
-        await rag.initialize_storages()
+        # Initialize HybridLightRAGCore (uses LiteLLM for Azure/OpenAI/etc.)
+        core = HybridLightRAGCore(config)
 
         # Execute query
-        result = await rag.aquery(
-            query_text,
-            param=QueryParam(mode=mode)
-        )
+        result = await core.aquery(query_text, mode=mode)
 
         print("\n💡 Response:")
         print("-" * 70)
-        print(result)
+        # Result is a QueryResult dataclass, access .result for the text
+        print(result.result if hasattr(result, 'result') else result)
         print("-" * 70)
+        if hasattr(result, 'execution_time'):
+            print(f"   Execution time: {result.execution_time:.2f}s")
+
+    async def _query_with_multihop(self, query_text: str, verbose: bool = False):
+        """Execute query using multi-hop reasoning with LightRAG tools."""
+        from src.lightrag_core import HybridLightRAGCore
+        from config.config import HybridRAGConfig
+
+        print("🧠 Using multi-hop reasoning with LightRAG tools...")
+
+        # Initialize config with CLI overrides
+        config = HybridRAGConfig()
+        config.lightrag.working_dir = self.working_dir
+        config.lightrag.model_name = self.llm_model
+        config.lightrag.embedding_model = self.embed_model
+
+        print(f"   Using LLM: {self.llm_model}")
+        print(f"   Database: {self.working_dir}")
+
+        # Initialize HybridLightRAGCore
+        core = HybridLightRAGCore(config)
+        await core._ensure_initialized()
+
+        # Initialize AgenticHybridRAG
+        try:
+            from src.agentic_rag import create_agentic_rag
+            agentic_rag = create_agentic_rag(
+                lightrag_core=core,
+                model_name=self.llm_model,
+                max_internal_steps=8,
+                verbose=verbose
+            )
+        except ImportError as e:
+            print(f"❌ Multi-hop requires PromptChain: {e}")
+            print("   Install with: pip install git+https://github.com/gyasis/PromptChain.git")
+            return
+        except Exception as e:
+            print(f"❌ Failed to initialize multi-hop: {e}")
+            return
+
+        # Execute multi-hop reasoning
+        print("   Executing multi-hop reasoning...")
+        result = await agentic_rag.execute_multi_hop_reasoning(
+            query=query_text,
+            timeout_seconds=300.0
+        )
+
+        # Display results
+        if result.get('success'):
+            print("\n💡 Response:")
+            print("-" * 70)
+            print(result.get('result', 'No result'))
+            print("-" * 70)
+
+            # Show reasoning steps if verbose
+            if verbose and result.get('reasoning_steps'):
+                print("\n🔍 Reasoning Steps:")
+                for i, step in enumerate(result['reasoning_steps'], 1):
+                    print(f"   {i}. {step}")
+
+            print(f"\n⏱️  {result.get('execution_time', 0):.2f}s | Steps: {len(result.get('reasoning_steps', []))} | Contexts: {len(result.get('accumulated_contexts', []))}")
+        else:
+            print(f"\n❌ Multi-hop failed: {result.get('error', 'Unknown error')}")
+            if result.get('reasoning_steps'):
+                print("\n🔍 Partial reasoning steps:")
+                for i, step in enumerate(result['reasoning_steps'], 1):
+                    print(f"   {i}. {step}")
 
     async def _query_with_promptchain(self, query_text: str, mode: str, agentic: bool):
         """Execute query using PromptChain for advanced reasoning."""
@@ -341,14 +524,27 @@ class HybridRAGCLI:
         print("\n" + "="*70)
         print("📖 HybridRAG Interactive Help")
         print("="*70)
-        print("\nQuery Modes:")
+        print("\n🔍 Query Modes (native LightRAG):")
         print("  :local    - Specific entity relationships and details")
+        print("              Best for: finding specific functions, classes, named concepts")
         print("  :global   - High-level overviews and broad patterns")
+        print("              Best for: understanding workflows, architecture, summaries")
         print("  :hybrid   - Balanced combination of local and global")
+        print("              Best for: general questions needing both specifics and context")
         print("  :naive    - Simple vector retrieval without graph")
+        print("              Best for: basic similarity search, no graph reasoning")
         print("  :mix      - Advanced multi-strategy retrieval")
-        print("\nCommands:")
-        print("  :context  - Toggle context-only mode (show retrieval context)")
+        print("              Best for: complex queries requiring all retrieval strategies")
+        print("\n🧠 Multi-Hop Reasoning:")
+        print("  :multihop - Toggle multi-hop reasoning mode")
+        print("              Uses AgenticStepProcessor to perform multi-step reasoning")
+        print("              LLM dynamically chooses which LightRAG tools to call")
+        print("              Great for complex questions requiring multiple queries")
+        print("\n⚙️  Settings:")
+        print("  :context  - Toggle context-only mode (show raw retrieval context)")
+        print("  :verbose  - Toggle verbose mode (show reasoning steps)")
+        print("  :stats    - Show database statistics")
+        print("\n📌 Other:")
         print("  :help     - Show this help")
         print("  :quit     - Exit interactive mode")
         print("\nJust type your query to search!")
@@ -669,13 +865,14 @@ class HybridRAGCLI:
         print("="*70)
 
         # Database info
+        from src.utils import format_file_size
         db_path = Path(self.working_dir)
         if db_path.exists():
             db_files = list(db_path.glob("*.json"))
-            db_size = sum(f.stat().st_size for f in db_files) / (1024 * 1024)
+            db_size = sum(f.stat().st_size for f in db_files)
             print(f"✅ Database: {db_path}")
             print(f"   Files: {len(db_files)}")
-            print(f"   Size: {db_size:.1f} MB")
+            print(f"   Size: {format_file_size(db_size)}")
         else:
             print(f"❌ No database found at: {db_path}")
 
@@ -713,12 +910,13 @@ class HybridRAGCLI:
         other_files = list(db_path.glob("*"))
 
         # Calculate sizes
+        from src.utils import format_file_size
         total_size = sum(f.stat().st_size for f in other_files if f.is_file())
 
         print(f"\n✅ Database exists")
         print(f"   JSON files: {len(json_files)}")
         print(f"   Total files: {len(other_files)}")
-        print(f"   Total size: {total_size / (1024 * 1024):.1f} MB")
+        print(f"   Total size: {format_file_size(total_size)}")
 
         # Show file breakdown
         print("\n📁 File breakdown:")
@@ -728,6 +926,586 @@ class HybridRAGCLI:
                 print(f"   {pattern}: {len(files)} file(s)")
 
         print("="*70)
+
+    # ========================================
+    # Database Registry Commands
+    # ========================================
+
+    async def run_db_command(self):
+        """Route database registry subcommands."""
+        db_cmd = getattr(self.args, 'db_command', None)
+
+        if not db_cmd:
+            print("❌ No db subcommand specified")
+            print("\nUsage: python hybridrag.py db <command>")
+            print("\nCommands:")
+            print("  register   - Register a new database")
+            print("  list       - List all registered databases")
+            print("  show       - Show database details")
+            print("  update     - Update database settings")
+            print("  unregister - Remove database from registry")
+            print("  sync       - Force re-ingest from source folder")
+            print("  watch      - Manage database watchers")
+            return
+
+        if db_cmd == 'register':
+            await self.run_db_register()
+        elif db_cmd == 'list':
+            await self.run_db_list()
+        elif db_cmd == 'show':
+            await self.run_db_show()
+        elif db_cmd == 'update':
+            await self.run_db_update()
+        elif db_cmd == 'unregister':
+            await self.run_db_unregister()
+        elif db_cmd == 'sync':
+            await self.run_db_sync()
+        elif db_cmd == 'watch':
+            await self.run_db_watch()
+        else:
+            print(f"❌ Unknown db command: {db_cmd}")
+
+    async def run_db_register(self):
+        """Register a new database in the registry."""
+        try:
+            registry = get_registry()
+        except Exception as e:
+            print(f"❌ Failed to load registry: {e}")
+            return
+
+        name = self.args.name
+        path = os.path.abspath(self.args.path)
+        source_folder = os.path.abspath(self.args.source_folder) if self.args.source_folder else None
+        source_type = self.args.type
+        auto_watch = self.args.auto_watch
+        interval = self.args.interval
+        model = getattr(self.args, 'db_model', None)
+        description = self.args.description
+        jira_project = getattr(self.args, 'jira_project', None)
+        extensions = self.args.extensions
+
+        # Parse extensions if provided
+        file_extensions = None
+        if extensions:
+            file_extensions = [ext.strip() for ext in extensions.split(',')]
+
+        # Build kwargs
+        kwargs = {
+            'source_type': source_type,
+            'auto_watch': auto_watch,
+            'watch_interval': interval,
+        }
+        if model:
+            kwargs['model'] = model
+        if description:
+            kwargs['description'] = description
+        if file_extensions:
+            kwargs['file_extensions'] = file_extensions
+
+        # Handle specstory-specific config
+        if source_type == 'specstory' and jira_project:
+            kwargs['specstory_config'] = {
+                'jira_project_key': jira_project
+            }
+
+        try:
+            entry = registry.register(
+                name=name,
+                path=path,
+                source_folder=source_folder,
+                **kwargs
+            )
+            print(f"✅ Registered database: {entry.name}")
+            print(f"   Path: {entry.path}")
+            if entry.source_folder:
+                print(f"   Source: {entry.source_folder}")
+            print(f"   Type: {entry.source_type}")
+            print(f"   Auto-watch: {entry.auto_watch}")
+            if entry.model:
+                print(f"   Model: {entry.model}")
+
+        except ValueError as e:
+            print(f"❌ Registration failed: {e}")
+        except Exception as e:
+            print(f"❌ Unexpected error: {e}")
+
+    async def run_db_list(self):
+        """List all registered databases."""
+        try:
+            registry = get_registry()
+        except Exception as e:
+            print(f"❌ Failed to load registry: {e}")
+            return
+
+        databases = registry.list_all()
+
+        if getattr(self.args, 'json', False):
+            # JSON output
+            import json
+            output = [entry.to_dict() for entry in databases]
+            print(json.dumps(output, indent=2, default=str))
+            return
+
+        if not databases:
+            print("\n📊 No databases registered")
+            print("\nRegister a database with:")
+            print("   python hybridrag.py db register mydb --path ./db --source ./data")
+            return
+
+        print("\n📊 Registered Databases")
+        print("="*70)
+
+        for entry in databases:
+            # Check watcher status
+            running, pid = is_watcher_running(entry.name)
+            watcher_status = f"🟢 PID {pid}" if running else "⚪ stopped"
+
+            print(f"\n{entry.name}")
+            print(f"   Path: {entry.path}")
+            if entry.source_folder:
+                print(f"   Source: {entry.source_folder}")
+            print(f"   Type: {entry.source_type}")
+            print(f"   Auto-watch: {entry.auto_watch} ({watcher_status})")
+            if entry.model:
+                print(f"   Model: {entry.model}")
+            if entry.description:
+                print(f"   Description: {entry.description}")
+
+        print("\n" + "="*70)
+        print(f"Total: {len(databases)} database(s)")
+
+    async def run_db_show(self):
+        """Show details for a specific database."""
+        try:
+            registry = get_registry()
+        except Exception as e:
+            print(f"❌ Failed to load registry: {e}")
+            return
+
+        name = self.args.name
+        entry = registry.get(name)
+
+        if not entry:
+            print(f"❌ Database not found: {name}")
+            print("\nAvailable databases:")
+            for db in registry.list_all():
+                print(f"   - {db.name}")
+            return
+
+        if getattr(self.args, 'json', False):
+            import json
+            print(json.dumps(entry.to_dict(), indent=2, default=str))
+            return
+
+        # Check watcher status
+        running, pid = is_watcher_running(entry.name)
+
+        print(f"\n📊 Database: {entry.name}")
+        print("="*70)
+        print(f"   Path:         {entry.path}")
+        print(f"   Source:       {entry.source_folder or 'Not set'}")
+        print(f"   Type:         {entry.source_type}")
+        print(f"   Auto-watch:   {entry.auto_watch}")
+        print(f"   Interval:     {entry.watch_interval}s")
+        print(f"   Model:        {entry.model or 'Default'}")
+        print(f"   Recursive:    {entry.recursive}")
+        print(f"   Description:  {entry.description or 'None'}")
+        print(f"   Created:      {entry.created_at}")
+        print(f"   Last sync:    {entry.last_sync or 'Never'}")
+
+        # Watcher status
+        if running:
+            print(f"\n🟢 Watcher running (PID: {pid})")
+        else:
+            print(f"\n⚪ Watcher stopped")
+
+        # Type-specific config
+        if entry.specstory_config:
+            print(f"\n   SpecStory Config:")
+            for key, val in entry.specstory_config.items():
+                print(f"      {key}: {val}")
+
+        if entry.file_extensions:
+            print(f"   Extensions: {', '.join(entry.file_extensions)}")
+
+        if entry.preprocessing_pipeline:
+            print(f"   Pipeline: {' → '.join(entry.preprocessing_pipeline)}")
+
+        print("="*70)
+
+    async def run_db_update(self):
+        """Update database settings."""
+        try:
+            registry = get_registry()
+        except Exception as e:
+            print(f"❌ Failed to load registry: {e}")
+            return
+
+        name = self.args.name
+        entry = registry.get(name)
+
+        if not entry:
+            print(f"❌ Database not found: {name}")
+            return
+
+        # Collect updates
+        updates = {}
+        if self.args.auto_watch is not None:
+            updates['auto_watch'] = self.args.auto_watch
+        if self.args.interval is not None:
+            updates['watch_interval'] = self.args.interval
+        if getattr(self.args, 'db_model', None):
+            updates['model'] = self.args.db_model
+        if self.args.description is not None:
+            updates['description'] = self.args.description
+
+        if not updates:
+            print("❌ No updates specified")
+            print("\nAvailable options:")
+            print("   --auto-watch true/false")
+            print("   --interval <seconds>")
+            print("   --model <model-name>")
+            print("   --description <text>")
+            return
+
+        try:
+            updated = registry.update(name, **updates)
+            print(f"✅ Updated database: {name}")
+            for key, val in updates.items():
+                print(f"   {key}: {val}")
+        except Exception as e:
+            print(f"❌ Update failed: {e}")
+
+    async def run_db_unregister(self):
+        """Remove database from registry."""
+        try:
+            registry = get_registry()
+        except Exception as e:
+            print(f"❌ Failed to load registry: {e}")
+            return
+
+        name = self.args.name
+        entry = registry.get(name)
+
+        if not entry:
+            print(f"❌ Database not found: {name}")
+            return
+
+        # Confirm unless --yes
+        if not getattr(self.args, 'yes', False):
+            print(f"\n⚠️  About to unregister: {name}")
+            print(f"   Path: {entry.path}")
+            print(f"\n   This removes the database from the registry.")
+            print(f"   The database files will NOT be deleted.")
+            response = input("\nProceed? [y/N]: ").strip().lower()
+            if response != 'y':
+                print("Cancelled.")
+                return
+
+        try:
+            registry.unregister(name)
+            print(f"✅ Unregistered database: {name}")
+        except Exception as e:
+            print(f"❌ Unregister failed: {e}")
+
+    async def run_db_sync(self):
+        """Force re-ingest from source folder."""
+        try:
+            registry = get_registry()
+        except Exception as e:
+            print(f"❌ Failed to load registry: {e}")
+            return
+
+        name = self.args.name
+        entry = registry.get(name)
+
+        if not entry:
+            print(f"❌ Database not found: {name}")
+            return
+
+        if not entry.source_folder:
+            print(f"❌ Database {name} has no source folder configured")
+            return
+
+        if not os.path.exists(entry.source_folder):
+            print(f"❌ Source folder does not exist: {entry.source_folder}")
+            return
+
+        fresh = getattr(self.args, 'fresh', False)
+        db_action = 'fresh' if fresh else 'add'
+
+        print(f"\n🔄 Syncing database: {name}")
+        print(f"   Source: {entry.source_folder}")
+        print(f"   Target: {entry.path}")
+        print(f"   Mode: {db_action}")
+
+        # Build ingest command args
+        original_working_dir = self.working_dir
+        self.working_dir = entry.path
+
+        # Temporarily modify args for ingest
+        original_folder = getattr(self.args, 'folder', None)
+        original_db_action = getattr(self.args, 'db_action', None)
+        original_recursive = getattr(self.args, 'recursive', True)
+
+        self.args.folder = entry.source_folder
+        self.args.db_action = db_action
+        self.args.recursive = entry.recursive
+
+        try:
+            await self.run_ingest()
+            # Update last_sync
+            registry.update_last_sync(name)
+            print(f"\n✅ Sync complete for: {name}")
+        except Exception as e:
+            print(f"❌ Sync failed: {e}")
+        finally:
+            # Restore original args
+            self.working_dir = original_working_dir
+            self.args.folder = original_folder
+            self.args.db_action = original_db_action
+            self.args.recursive = original_recursive
+
+    async def run_db_watch(self):
+        """Handle watch subcommands."""
+        watch_cmd = getattr(self.args, 'watch_command', None)
+
+        if not watch_cmd:
+            print("❌ No watch subcommand specified")
+            print("\nUsage: python hybridrag.py db watch <command>")
+            print("\nCommands:")
+            print("  start  - Start watcher for a database")
+            print("  stop   - Stop watcher for a database")
+            print("  status - Show watcher status")
+            return
+
+        if watch_cmd == 'start':
+            await self.run_db_watch_start()
+        elif watch_cmd == 'stop':
+            await self.run_db_watch_stop()
+        elif watch_cmd == 'status':
+            await self.run_db_watch_status()
+        else:
+            print(f"❌ Unknown watch command: {watch_cmd}")
+
+    async def run_db_watch_start(self):
+        """Start watcher for a database."""
+        try:
+            registry = get_registry()
+        except Exception as e:
+            print(f"❌ Failed to load registry: {e}")
+            return
+
+        start_all = getattr(self.args, 'all', False)
+        use_systemd = getattr(self.args, 'systemd', False)
+
+        if start_all:
+            # Start all auto-watch databases
+            auto_watch_dbs = registry.get_auto_watch_databases()
+            if not auto_watch_dbs:
+                print("❌ No databases with auto-watch enabled")
+                return
+
+            print(f"\n🚀 Starting watchers for {len(auto_watch_dbs)} database(s)...")
+            for entry in auto_watch_dbs:
+                await self._start_watcher_for_db(entry, use_systemd)
+        else:
+            name = getattr(self.args, 'name', None)
+            if not name:
+                print("❌ Database name required (or use --all)")
+                return
+
+            entry = registry.get(name)
+            if not entry:
+                print(f"❌ Database not found: {name}")
+                return
+
+            await self._start_watcher_for_db(entry, use_systemd)
+
+    async def _start_watcher_for_db(self, entry: DatabaseEntry, use_systemd: bool = False):
+        """Start watcher for a specific database entry."""
+        from src.database_registry import get_watcher_pid_file
+
+        # Check if already running
+        running, pid = is_watcher_running(entry.name)
+        if running:
+            print(f"⚠️  Watcher already running for {entry.name} (PID: {pid})")
+            return
+
+        if not entry.source_folder:
+            print(f"❌ No source folder for {entry.name}")
+            return
+
+        pid_file = get_watcher_pid_file(entry.name)
+
+        if use_systemd:
+            # Systemd mode - placeholder for now
+            print(f"⚠️  Systemd mode not yet implemented for {entry.name}")
+            print(f"   Use standalone mode: python hybridrag.py db watch start {entry.name}")
+            return
+
+        # Standalone mode - start background process
+        import subprocess
+
+        script_path = Path(__file__).parent / "scripts" / "hybridrag-watcher.py"
+        if not script_path.exists():
+            # Fall back to existing bash script
+            bash_script = Path(__file__).parent / "scripts" / "watch_specstory_folders.sh"
+            if bash_script.exists() and entry.source_type == 'specstory':
+                print(f"🔄 Starting legacy watcher for {entry.name}...")
+                cmd = [
+                    str(bash_script),
+                    entry.source_folder,
+                    str(entry.watch_interval),
+                ]
+                if entry.model:
+                    cmd.append(entry.model)
+
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True
+                )
+                # The script handles its own PID file
+                print(f"✅ Started watcher for {entry.name} (legacy mode)")
+                return
+
+            print(f"⚠️  Watcher script not found. Please create scripts/hybridrag-watcher.py")
+            print(f"   or use: python hybridrag.py db watch start-all --systemd")
+            return
+
+        # Run the Python watcher script
+        cmd = [
+            sys.executable,
+            str(script_path),
+            entry.name,
+        ]
+
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True
+        )
+
+        # Write PID file
+        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        pid_file.write_text(str(proc.pid))
+
+        print(f"✅ Started watcher for {entry.name} (PID: {proc.pid})")
+
+    async def run_db_watch_stop(self):
+        """Stop watcher for a database."""
+        try:
+            registry = get_registry()
+        except Exception as e:
+            print(f"❌ Failed to load registry: {e}")
+            return
+
+        from src.database_registry import get_watcher_pid_file
+        import signal
+
+        stop_all = getattr(self.args, 'all', False)
+
+        if stop_all:
+            # Stop all watchers
+            databases = registry.list_all()
+            stopped = 0
+            for entry in databases:
+                running, pid = is_watcher_running(entry.name)
+                if running and pid:
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                        pid_file = get_watcher_pid_file(entry.name)
+                        if pid_file.exists():
+                            pid_file.unlink()
+                        print(f"✅ Stopped watcher for {entry.name}")
+                        stopped += 1
+                    except ProcessLookupError:
+                        pass
+                    except Exception as e:
+                        print(f"⚠️  Error stopping {entry.name}: {e}")
+
+            print(f"\nStopped {stopped} watcher(s)")
+        else:
+            name = getattr(self.args, 'name', None)
+            if not name:
+                print("❌ Database name required (or use --all)")
+                return
+
+            running, pid = is_watcher_running(name)
+            if not running:
+                print(f"⚠️  No watcher running for {name}")
+                return
+
+            try:
+                os.kill(pid, signal.SIGTERM)
+                pid_file = get_watcher_pid_file(name)
+                if pid_file.exists():
+                    pid_file.unlink()
+                print(f"✅ Stopped watcher for {name} (was PID: {pid})")
+            except ProcessLookupError:
+                print(f"⚠️  Process {pid} not found (already stopped?)")
+                pid_file = get_watcher_pid_file(name)
+                if pid_file.exists():
+                    pid_file.unlink()
+            except Exception as e:
+                print(f"❌ Error stopping watcher: {e}")
+
+    async def run_db_watch_status(self):
+        """Show watcher status."""
+        try:
+            registry = get_registry()
+        except Exception as e:
+            print(f"❌ Failed to load registry: {e}")
+            return
+
+        name = getattr(self.args, 'name', None)
+
+        if name:
+            # Show status for specific database
+            entry = registry.get(name)
+            if not entry:
+                print(f"❌ Database not found: {name}")
+                return
+
+            running, pid = is_watcher_running(name)
+            print(f"\n🔍 Watcher Status: {name}")
+            print("="*50)
+            if running:
+                print(f"   Status: 🟢 Running (PID: {pid})")
+            else:
+                print(f"   Status: ⚪ Stopped")
+            print(f"   Auto-watch: {entry.auto_watch}")
+            print(f"   Interval: {entry.watch_interval}s")
+            print(f"   Source: {entry.source_folder or 'Not set'}")
+        else:
+            # Show status for all databases
+            databases = registry.list_all()
+
+            print("\n🔍 Watcher Status")
+            print("="*60)
+
+            if not databases:
+                print("No databases registered")
+                return
+
+            running_count = 0
+            for entry in databases:
+                running, pid = is_watcher_running(entry.name)
+                if running:
+                    running_count += 1
+                    status = f"🟢 PID {pid}"
+                else:
+                    status = "⚪ stopped"
+
+                auto = "✓" if entry.auto_watch else " "
+                print(f"   [{auto}] {entry.name:20} {status}")
+
+            print("="*60)
+            print(f"Running: {running_count}/{len(databases)}")
+            print("\n   [✓] = auto-watch enabled")
 
 
 def create_parser():
@@ -764,6 +1542,7 @@ Examples:
     # Global options
     parser.add_argument('--config', help='Config file path')
     parser.add_argument('--working-dir', default='./lightrag_db', help='LightRAG database directory')
+    parser.add_argument('--db', metavar='NAME', help='Use registered database by name (e.g., --db specstory)')
     parser.add_argument('--model', help='Override LLM model (e.g., azure/gpt-5.1, gemini/gemini-pro, anthropic/claude-opus)')
     parser.add_argument('--embed-model', help='Override embedding model (e.g., azure/text-embedding-3-small)')
 
@@ -776,7 +1555,9 @@ Examples:
     query_parser.add_argument('--mode', choices=['local', 'global', 'hybrid', 'naive', 'mix'],
                              default='hybrid', help='Query mode')
     query_parser.add_argument('--agentic', action='store_true', help='Use agentic multi-hop reasoning')
+    query_parser.add_argument('--multihop', action='store_true', help='Use multi-hop reasoning with LightRAG tools')
     query_parser.add_argument('--use-promptchain', action='store_true', help='Use PromptChain for queries')
+    query_parser.add_argument('--verbose', '-v', action='store_true', help='Show reasoning steps')
 
     # Interactive command
     interactive_parser = subparsers.add_parser('interactive', help='Start interactive query interface')
@@ -806,6 +1587,75 @@ Examples:
 
     # Db-info command
     dbinfo_parser = subparsers.add_parser('db-info', help='Show detailed database information with source folders')
+
+    # ========================================
+    # Database Registry Commands
+    # ========================================
+    db_parser = subparsers.add_parser('db', help='Database registry management')
+    db_subparsers = db_parser.add_subparsers(dest='db_command', help='Database command')
+
+    # db register
+    db_register = db_subparsers.add_parser('register', help='Register a new database')
+    db_register.add_argument('name', help='Database name (lowercase alphanumeric + hyphens)')
+    db_register.add_argument('--path', required=True, help='Path to database directory')
+    db_register.add_argument('--source', '--source-folder', dest='source_folder',
+                            help='Path to source data folder')
+    db_register.add_argument('--type', choices=['filesystem', 'specstory', 'api', 'schema'],
+                            default='filesystem', help='Source type (default: filesystem)')
+    db_register.add_argument('--auto-watch', action='store_true', help='Enable auto-watching')
+    db_register.add_argument('--interval', type=int, default=300,
+                            help='Watch interval in seconds (default: 300)')
+    db_register.add_argument('--model', dest='db_model', help='Model to use for this database')
+    db_register.add_argument('--description', help='Database description')
+    db_register.add_argument('--jira-project', help='JIRA project key (for specstory type)')
+    db_register.add_argument('--extensions', help='File extensions to watch (comma-separated)')
+
+    # db list
+    db_list = db_subparsers.add_parser('list', help='List all registered databases')
+    db_list.add_argument('--json', action='store_true', help='Output as JSON')
+
+    # db show
+    db_show = db_subparsers.add_parser('show', help='Show database details')
+    db_show.add_argument('name', help='Database name')
+    db_show.add_argument('--json', action='store_true', help='Output as JSON')
+
+    # db update
+    db_update = db_subparsers.add_parser('update', help='Update database settings')
+    db_update.add_argument('name', help='Database name')
+    db_update.add_argument('--auto-watch', type=lambda x: x.lower() == 'true',
+                          help='Enable/disable auto-watching (true/false)')
+    db_update.add_argument('--interval', type=int, help='Watch interval in seconds')
+    db_update.add_argument('--model', dest='db_model', help='Model to use')
+    db_update.add_argument('--description', help='Database description')
+
+    # db unregister
+    db_unregister = db_subparsers.add_parser('unregister', help='Remove database from registry')
+    db_unregister.add_argument('name', help='Database name')
+    db_unregister.add_argument('--yes', '-y', action='store_true', help='Skip confirmation')
+
+    # db sync
+    db_sync = db_subparsers.add_parser('sync', help='Force re-ingest from source folder')
+    db_sync.add_argument('name', help='Database name')
+    db_sync.add_argument('--fresh', action='store_true', help='Start fresh (clear database first)')
+
+    # db watch
+    db_watch_parser = db_subparsers.add_parser('watch', help='Manage database watchers')
+    db_watch_subparsers = db_watch_parser.add_subparsers(dest='watch_command', help='Watch command')
+
+    # db watch start
+    db_watch_start = db_watch_subparsers.add_parser('start', help='Start watcher for a database')
+    db_watch_start.add_argument('name', nargs='?', help='Database name (or all if --all)')
+    db_watch_start.add_argument('--all', action='store_true', help='Start all auto-watch databases')
+    db_watch_start.add_argument('--systemd', action='store_true', help='Use systemd mode')
+
+    # db watch stop
+    db_watch_stop = db_watch_subparsers.add_parser('stop', help='Stop watcher for a database')
+    db_watch_stop.add_argument('name', nargs='?', help='Database name (or all if --all)')
+    db_watch_stop.add_argument('--all', action='store_true', help='Stop all watchers')
+
+    # db watch status
+    db_watch_status = db_watch_subparsers.add_parser('status', help='Show watcher status')
+    db_watch_status.add_argument('name', nargs='?', help='Database name (optional)')
 
     return parser
 
