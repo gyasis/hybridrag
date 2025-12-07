@@ -150,6 +150,8 @@ class HybridRAGCLI:
             await self.show_database_info()
         elif command == 'db':
             await self.run_db_command()
+        elif command == 'monitor':
+            self.run_monitor()
         else:
             print(f"❌ Unknown command: {command}")
             return 1
@@ -1536,6 +1538,11 @@ Examples:
   python hybridrag.py check-db
   python hybridrag.py list-dbs              # List all databases
   python hybridrag.py db-info               # Show database details
+
+  # Interactive Monitor
+  python hybridrag.py monitor               # Launch TUI dashboard
+  python hybridrag.py monitor --new         # Start with database wizard
+  python hybridrag.py monitor --refresh 5   # Custom refresh rate
         """
     )
 
@@ -1587,6 +1594,13 @@ Examples:
 
     # Db-info command
     dbinfo_parser = subparsers.add_parser('db-info', help='Show detailed database information with source folders')
+
+    # Monitor command (TUI dashboard)
+    monitor_parser = subparsers.add_parser('monitor', help='Launch interactive TUI dashboard')
+    monitor_parser.add_argument('--refresh', '-r', type=int, default=2,
+                               help='Refresh interval in seconds (default: 2)')
+    monitor_parser.add_argument('--new', '-n', action='store_true',
+                               help='Start with new database wizard')
 
     # ========================================
     # Database Registry Commands
@@ -1660,7 +1674,30 @@ Examples:
     return parser
 
 
-async def main():
+async def async_main(args):
+    """Async entry point for non-monitor commands."""
+    cli = HybridRAGCLI(args)
+    return await cli.run()
+
+
+def run_monitor_command(args):
+    """Run the monitor command with its own event loop."""
+    try:
+        from src.monitor import run_monitor
+    except ImportError as e:
+        print(f"❌ Monitor dependencies not installed: {e}")
+        print("\nInstall with:")
+        print("   pip install textual psutil")
+        return 1
+
+    refresh_interval = getattr(args, 'refresh', 2)
+    start_wizard = getattr(args, 'new', False)
+
+    run_monitor(refresh_interval=refresh_interval, start_wizard=start_wizard)
+    return 0
+
+
+def main():
     """Main entry point."""
     parser = create_parser()
     args = parser.parse_args()
@@ -1669,9 +1706,13 @@ async def main():
         parser.print_help()
         return 1
 
-    cli = HybridRAGCLI(args)
-    return await cli.run()
+    # Special handling for monitor command (needs its own event loop)
+    if args.command == 'monitor':
+        return run_monitor_command(args)
+
+    # All other commands run in async context
+    return asyncio.run(async_main(args))
 
 
 if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))
+    sys.exit(main())

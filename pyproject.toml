@@ -24,6 +24,9 @@ dependencies = [
     "litellm>=1.0.0",
     # MCP server for Claude Desktop integration
     "fastmcp>=0.1.0",
+    # TUI framework for interactive monitor
+    "textual>=0.40.0",
+    "psutil>=5.9.0",
 ]
 
 [project.optional-dependencies]
