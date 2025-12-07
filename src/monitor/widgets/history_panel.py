@@ -175,10 +175,11 @@ class HistoryPanel(Static):
         summary.append(f" in ", style="dim")
         summary.append(f"{active_hours}/24 hours", style="bold cyan")
 
+        from rich.box import SIMPLE
         self.update(Panel(
             table,
             border_style="dim",
-            box=None,
+            box=SIMPLE,
             title="24-Hour Processing Timeline",
             subtitle=f"[dim]{self.filter_database or 'All databases'} | ● active ○ idle[/dim]"
         ))

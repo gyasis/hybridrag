@@ -15,6 +15,7 @@ from textual.reactive import reactive
 from rich.table import Table
 from rich.panel import Panel
 from rich.text import Text
+from rich.box import SIMPLE
 
 from ..data_collector import DatabaseStats
 
@@ -96,7 +97,7 @@ class SourceFilesPanel(Static):
             Text("Select a database to view source files", style="dim italic"),
             title="Source Files",
             border_style="dim",
-            box=None
+            box=SIMPLE
         )
 
     def _render_files(self, db: DatabaseStats) -> Panel:
@@ -106,7 +107,7 @@ class SourceFilesPanel(Static):
                 Text("No source folder configured", style="dim italic"),
                 title=f"Source Files: {db.name}",
                 border_style="dim",
-                box=None
+                box=SIMPLE
             )
 
         files = self._get_source_files(db.source_folder)
@@ -116,14 +117,14 @@ class SourceFilesPanel(Static):
                 Text("No files found in source folder", style="dim italic"),
                 title=f"Source Files: {db.name}",
                 border_style="dim",
-                box=None
+                box=SIMPLE
             )
 
         table = Table(
             show_header=True,
             header_style="bold",
             expand=True,
-            box=None,
+            box=SIMPLE,
             padding=(0, 1)
         )
 
@@ -157,7 +158,7 @@ class SourceFilesPanel(Static):
             title=f"Source Files ({len(files)} shown)",
             subtitle=f"[dim]{source_short}[/dim]",
             border_style="dim",
-            box=None
+            box=SIMPLE
         )
 
     def watch_database(self, database: DatabaseStats | None) -> None:

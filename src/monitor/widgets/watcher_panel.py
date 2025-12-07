@@ -10,6 +10,7 @@ from textual.reactive import reactive
 from rich.panel import Panel
 from rich.text import Text
 from rich.table import Table
+from rich.box import SIMPLE
 
 from ..data_collector import DatabaseStats
 
@@ -39,7 +40,7 @@ class WatcherPanel(Static):
             Text("Select a database to view watcher details", style="dim italic"),
             title="Watcher",
             border_style="dim",
-            box=None
+            box=SIMPLE
         )
 
     def _render_watcher(self, db: DatabaseStats) -> Panel:
@@ -101,7 +102,7 @@ class WatcherPanel(Static):
             table,
             title=f"Watcher: {db.name}",
             border_style="dim",
-            box=None
+            box=SIMPLE
         )
 
     def watch_database(self, database: DatabaseStats | None) -> None:

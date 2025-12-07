@@ -10,6 +10,7 @@ from textual.reactive import reactive
 from rich.panel import Panel
 from rich.text import Text
 from rich.table import Table
+from rich.box import SIMPLE
 
 from ..data_collector import DatabaseStats
 
@@ -71,7 +72,7 @@ class ActionPanel(Static):
             table,
             title="Actions",
             border_style="dim",
-            box=None
+            box=SIMPLE
         )
 
     def watch_database(self, database: DatabaseStats | None) -> None:

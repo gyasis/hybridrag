@@ -1,0 +1,50 @@
+{
+  "mcpServers": {
+    "hybridrag-notes": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/path/to/hybridrag",
+        "run",
+        "python",
+        "-m",
+        "hybridrag_mcp"
+      ],
+      "env": {
+        "HYBRIDRAG_DATABASE": "/path/to/notes_lightrag_db"
+      }
+    },
+    "hybridrag-code": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/path/to/hybridrag",
+        "run",
+        "python",
+        "-m",
+        "hybridrag_mcp"
+      ],
+      "env": {
+        "HYBRIDRAG_DATABASE": "/path/to/code_lightrag_db",
+        "HYBRIDRAG_MODEL": "azure/gpt-4o"
+      }
+    },
+    "hybridrag-specstory": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/path/to/hybridrag",
+        "run",
+        "python",
+        "-m",
+        "hybridrag_mcp"
+      ],
+      "env": {
+        "HYBRIDRAG_DATABASE": "/path/to/specstory_lightrag_db",
+        "HYBRIDRAG_MODEL": "azure/gpt-4o",
+        "AZURE_API_KEY": "${AZURE_API_KEY}",
+        "AZURE_API_BASE": "${AZURE_API_BASE}"
+      }
+    }
+  }
+}
