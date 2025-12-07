@@ -107,23 +107,34 @@ async def hybridrag_query(
     max_relation_tokens: int = 8000
 ) -> str:
     """
-    Query the HybridRAG knowledge base with configurable retrieval modes.
+    Query the HybridRAG knowledge graph with configurable retrieval modes.
+
+    This is the main query tool with full control over retrieval strategy.
+
+    MODE SELECTION GUIDE:
+    - "local": For SPECIFIC entities, names, or things. Use when query targets a particular item.
+    - "global": For OVERVIEWS, summaries, themes, or patterns across the knowledge base.
+    - "hybrid": RECOMMENDED DEFAULT. Combines local + global for balanced results.
+    - "naive": Simple vector similarity. Use for keyword/text matching without graph reasoning.
+    - "mix": ALL strategies combined. Use for comprehensive research requiring full coverage.
+
+    DECISION TREE:
+    1. Asking about a specific named thing? -> "local"
+    2. Asking for overview/summary/patterns? -> "global"
+    3. Need both specifics AND context? -> "hybrid"
+    4. Simple keyword search? -> "naive"
+    5. Need everything possible? -> "mix"
 
     Args:
-        query: Search query or question about the knowledge base
-        mode: Retrieval mode:
-            - local: Entity-focused, specific relationships
-            - global: Community-based summaries and overviews
-            - hybrid: Combined local + global (recommended default)
-            - naive: Basic vector similarity
-            - mix: All strategies combined
-        top_k: Number of top results to retrieve (default: 10)
-        context_only: Return raw context without LLM generation
-        max_entity_tokens: Max tokens for entity context (local/hybrid modes)
-        max_relation_tokens: Max tokens for relation context (global/hybrid modes)
+        query: Natural language question or search terms
+        mode: Retrieval strategy (local|global|hybrid|naive|mix). Default: hybrid
+        top_k: Number of results per strategy (default: 10)
+        context_only: Return raw retrieved chunks without LLM synthesis
+        max_entity_tokens: Max tokens for entity context in local/hybrid modes
+        max_relation_tokens: Max tokens for relationship context in global/hybrid modes
 
     Returns:
-        Query result from LightRAG
+        Synthesized answer from the knowledge graph with execution metadata
     """
     try:
         core = await get_lightrag_core()
@@ -159,20 +170,23 @@ async def hybridrag_local_query(
     max_entity_tokens: int = 6000
 ) -> str:
     """
-    Query using LOCAL mode for specific entity relationships.
+    Query for SPECIFIC entities and their direct relationships in the knowledge graph.
 
-    Best for:
-    - Finding specific functions, classes, or named concepts
-    - Looking up entity definitions and properties
-    - Tracing direct relationships between entities
+    USE THIS when the query targets a PARTICULAR named thing:
+    - Specific functions, classes, tables, or modules
+    - Named concepts, people, or identifiers
+    - Direct relationships between known entities
+    - "What is X?" or "Find Y" type questions
+
+    DO NOT USE for overviews, summaries, or pattern discovery - use global_query instead.
 
     Args:
-        query: Search query targeting specific entities
-        top_k: Number of entity matches to retrieve
-        max_entity_tokens: Maximum tokens for entity context
+        query: The specific entity or thing to find
+        top_k: Number of entity matches to retrieve (default: 10)
+        max_entity_tokens: Max tokens for entity context (default: 6000)
 
     Returns:
-        Entity-focused query results
+        Entity-focused results with direct relationships
     """
     try:
         core = await get_lightrag_core()
@@ -200,20 +214,24 @@ async def hybridrag_global_query(
     max_relation_tokens: int = 8000
 ) -> str:
     """
-    Query using GLOBAL mode for high-level overviews and summaries.
+    Query for HIGH-LEVEL overviews, summaries, and patterns across the knowledge graph.
 
-    Best for:
-    - Understanding overall architecture or workflow
-    - Getting summaries of large document sets
-    - Identifying high-level patterns and themes
+    USE THIS when the query asks for:
+    - Overviews or summaries of topics/domains
+    - Patterns, themes, or trends across documents
+    - Architecture or workflow understanding
+    - "What are the main..." or "Summarize..." type questions
+    - Broad categorization or classification
+
+    DO NOT USE for specific entity lookups - use local_query instead.
 
     Args:
-        query: Search query for overviews or summaries
-        top_k: Number of community matches to retrieve
-        max_relation_tokens: Maximum tokens for relationship context
+        query: Question asking for overview, summary, or patterns
+        top_k: Number of community/cluster matches (default: 10)
+        max_relation_tokens: Max tokens for relationship context (default: 8000)
 
     Returns:
-        High-level overview and summary results
+        High-level summaries and patterns from community-based retrieval
     """
     try:
         core = await get_lightrag_core()
@@ -242,25 +260,26 @@ async def hybridrag_hybrid_query(
     max_relation_tokens: int = 8000
 ) -> str:
     """
-    Query using HYBRID mode combining local entities and global context.
+    Query combining BOTH local entity details AND global context. RECOMMENDED DEFAULT.
 
-    This is the recommended default for most queries. Combines:
-    - Entity-specific information (local)
-    - Community summaries and relationships (global)
+    USE THIS when:
+    - You need both specific details AND broader context
+    - The query is general-purpose or you're unsure which mode fits
+    - Questions involve relationships between entities AND their context
+    - Most everyday questions about the knowledge base
 
-    Best for:
-    - General questions needing both specifics and context
-    - Most everyday queries
-    - When unsure which mode to use
+    This combines:
+    - Local: Specific entity information and direct relationships
+    - Global: Community summaries and high-level patterns
 
     Args:
-        query: Search query
-        top_k: Number of matches per strategy
-        max_entity_tokens: Maximum entity tokens
-        max_relation_tokens: Maximum relation tokens
+        query: Any natural language question
+        top_k: Number of matches per strategy (default: 10)
+        max_entity_tokens: Max tokens for entity details (default: 6000)
+        max_relation_tokens: Max tokens for relationships (default: 8000)
 
     Returns:
-        Comprehensive results combining local and global retrieval
+        Comprehensive results combining entity details with broader context
     """
     try:
         core = await get_lightrag_core()
@@ -289,27 +308,30 @@ async def hybridrag_multihop_query(
     verbose: bool = False
 ) -> str:
     """
-    Execute multi-hop reasoning for complex analytical queries.
+    Execute MULTI-STEP agentic reasoning for COMPLEX analytical queries.
 
-    Uses PromptChain's AgenticStepProcessor to perform multi-step analysis:
-    1. Analyzes the query and determines information needs
-    2. Plans which LightRAG tools to call
-    3. Executes multiple tool calls, accumulating context
-    4. Synthesizes a final answer from gathered information
+    USE THIS for questions that CANNOT be answered in a single retrieval:
+    - Comparative analysis: "Compare X with Y", "What's the difference between A and B?"
+    - Multi-entity questions: "How do A, B, and C all relate to each other?"
+    - Tracing/lineage: "Trace the flow from X to Z", "What's the chain from A to B?"
+    - Complex analysis requiring multiple perspectives and synthesis
 
-    Best for:
-    - Complex analytical questions requiring multiple perspectives
-    - Comparative analysis ("Compare X and Y")
-    - Multi-entity queries ("How do A, B, and C relate?")
-    - Questions requiring both specific details and broad context
+    HOW IT WORKS (different from other tools):
+    1. An AI agent analyzes what information is needed
+    2. Agent plans and executes MULTIPLE queries (local, global, hybrid)
+    3. Agent accumulates context across multiple retrieval steps
+    4. Agent synthesizes a final comprehensive answer
+
+    SLOWER but MORE THOROUGH than single-mode queries. Use when simpler queries fail
+    to provide complete answers.
 
     Args:
         query: Complex question requiring multi-step reasoning
-        max_steps: Maximum reasoning steps (2-10 recommended)
-        verbose: Include reasoning trace in output
+        max_steps: Max reasoning iterations (default: 8, range: 2-10)
+        verbose: Include step-by-step reasoning trace in output
 
     Returns:
-        Synthesized answer from multi-hop reasoning
+        Synthesized answer from multi-hop reasoning with execution metadata
     """
     try:
         core = await get_lightrag_core()
@@ -329,14 +351,21 @@ async def hybridrag_multihop_query(
             verbose=verbose
         )
 
-        # Execute multi-hop reasoning
-        result = await agentic.execute_multi_hop_reasoning(
-            query=query,
-            timeout_seconds=300.0
-        )
+        # Execute multi-hop reasoning with shield to protect from client cancellation
+        # This prevents the MCP client timeout from cancelling the long-running operation
+        try:
+            result = await asyncio.shield(
+                agentic.execute_multi_hop_reasoning(
+                    query=query,
+                    timeout_seconds=600.0
+                )
+            )
+        except asyncio.CancelledError:
+            logger.warning("Multi-hop query cancelled by client - this is expected for long queries")
+            return "Query was cancelled. Multi-hop reasoning takes time (2-10 minutes). Please try again or use a simpler query mode (hybrid, local, global) for faster results."
 
-        # Format response
-        response = result.get('answer', 'No answer generated')
+        # Format response - agentic_rag returns 'result' key, not 'answer'
+        response = result.get('result') or result.get('answer', 'No answer generated')
 
         if verbose and 'reasoning_trace' in result:
             response += f"\n\n---\n**Reasoning Trace:**\n{result['reasoning_trace']}"
@@ -345,6 +374,9 @@ async def hybridrag_multihop_query(
 
         return response
 
+    except asyncio.CancelledError:
+        logger.warning("Multi-hop query cancelled during setup")
+        return "Query was cancelled during initialization. Multi-hop reasoning requires more time. Try using hybrid mode for faster results."
     except Exception as e:
         logger.error(f"Multi-hop query error: {e}")
         return f"Error executing multi-hop query: {str(e)}"
@@ -357,23 +389,24 @@ async def hybridrag_extract_context(
     top_k: int = 10
 ) -> str:
     """
-    Extract raw context from the knowledge base without LLM generation.
+    Extract RAW context chunks WITHOUT LLM synthesis - for inspection or custom processing.
 
-    Returns the retrieved context chunks that would be used to answer the query,
-    without passing them through an LLM for synthesis.
+    USE THIS when you want to:
+    - See exactly what chunks were retrieved (debugging)
+    - Build your own custom prompt with the raw context
+    - Inspect retrieval quality before running a full query
+    - Pass context to a different LLM or processing pipeline
 
-    Useful for:
-    - Seeing exactly what was retrieved
-    - Building custom prompts with the context
-    - Debugging retrieval quality
+    Unlike other query tools, this returns the raw retrieved text chunks
+    WITHOUT passing them through an LLM for answer generation.
 
     Args:
-        query: Search query
-        mode: Retrieval mode (local, global, hybrid)
-        top_k: Number of results to retrieve
+        query: Search query to retrieve context for
+        mode: Retrieval strategy - local|global|hybrid (default: hybrid)
+        top_k: Number of context chunks to retrieve (default: 10)
 
     Returns:
-        Raw retrieved context
+        Raw text chunks from the knowledge graph (no LLM processing)
     """
     try:
         core = await get_lightrag_core()
@@ -394,16 +427,18 @@ async def hybridrag_extract_context(
 @mcp.tool
 async def hybridrag_database_status() -> str:
     """
-    Get the current status of the HybridRAG database.
+    Get status and statistics about the HybridRAG knowledge graph database.
 
-    Returns information about:
-    - Database location and size
-    - Model configuration
-    - Graph statistics
-    - Initialization status
+    USE THIS to check:
+    - Database path and whether it's properly initialized
+    - Which LLM and embedding models are configured
+    - Graph size and storage statistics
+    - Cache status
+
+    Helpful for debugging connection issues or verifying configuration.
 
     Returns:
-        Database status information
+        Database status including path, models, and graph statistics
     """
     try:
         core = await get_lightrag_core()
@@ -441,15 +476,20 @@ async def hybridrag_database_status() -> str:
 @mcp.tool
 async def hybridrag_health_check() -> str:
     """
-    Perform a health check on the HybridRAG system.
+    Perform a health check to verify the HybridRAG system is working.
 
-    Checks:
-    - Database initialization
-    - Query functionality
-    - Working directory status
+    USE THIS when:
+    - Queries are failing or returning errors
+    - You want to verify the system is properly initialized
+    - Troubleshooting connection or configuration issues
+
+    Checks performed:
+    - Database initialization status
+    - Working directory accessibility
+    - Basic query functionality
 
     Returns:
-        Health check results
+        Health status (healthy/degraded/unhealthy) with diagnostic details
     """
     try:
         core = await get_lightrag_core()

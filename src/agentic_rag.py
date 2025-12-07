@@ -565,7 +565,7 @@ class AgenticHybridRAG:
         query: str,
         objective: Optional[str] = None,
         reset_context: bool = True,
-        timeout_seconds: float = 300.0,
+        timeout_seconds: float = 600.0,
         circuit_breaker_failures: int = 3
     ) -> Dict[str, Any]:
         """
