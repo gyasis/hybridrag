@@ -5,8 +5,9 @@ History Panel Widget
 Shows 24-hour timeline of when files were last processed each hour.
 """
 
+import json
 from datetime import datetime, timedelta
-from collections import defaultdict
+from pathlib import Path
 from typing import Dict, List, Optional
 
 from textual.widgets import Static
@@ -18,7 +19,7 @@ from rich.text import Text
 from ..data_collector import LogEntry
 
 
-class HistoryPanel(Static):
+class HistoryPanel(Static, can_focus=True):
     """
     Panel showing 24-hour timeline of file processing activity.
 
@@ -36,6 +37,11 @@ class HistoryPanel(Static):
         super().__init__(**kwargs)
         self._hourly_data: Dict[int, Dict] = {}  # hour (0-23) -> data
 
+    def on_mount(self) -> None:
+        """Initialize with empty timeline."""
+        self._compute_24h_timeline()
+        self.refresh_display()
+
     def update_entries(self, entries: List[LogEntry]) -> None:
         """Update with new log entries."""
         self.entries = entries
@@ -43,12 +49,12 @@ class HistoryPanel(Static):
         self.refresh_display()
 
     def _compute_24h_timeline(self) -> None:
-        """Build 24-hour timeline of activity."""
+        """Build 48-hour timeline of activity from logs AND database metadata."""
         now = datetime.now()
 
-        # Initialize all 24 hours
+        # Initialize all 48 hours (show 30 most recent with activity)
         self._hourly_data = {}
-        for i in range(24):
+        for i in range(48):
             hour_start = now.replace(minute=0, second=0, microsecond=0) - timedelta(hours=i)
             self._hourly_data[i] = {
                 "hour_start": hour_start,
@@ -58,10 +64,11 @@ class HistoryPanel(Static):
                 "databases": set()
             }
 
-        cutoff = now - timedelta(hours=24)
+        cutoff = now - timedelta(hours=48)
 
+        # Source 1: Log entries
         for entry in self.entries:
-            # Skip entries older than 24 hours
+            # Skip entries older than 48 hours
             if entry.timestamp < cutoff:
                 continue
 
@@ -71,13 +78,23 @@ class HistoryPanel(Static):
 
             # Count file processing and success messages
             msg_lower = entry.message.lower()
-            keywords = ["ingest", "processed", "added", "file", "chunk", "success", "complete", "found", "queued"]
-            if not any(kw in msg_lower for kw in keywords):
+
+            # Negative keywords - skip error/failure messages
+            negative_keywords = ["error", "failed", "exception", "traceback", "not found", "missing", "cannot", "unable"]
+            if any(neg in msg_lower for neg in negative_keywords):
                 continue
 
-            # Calculate which hour bucket (0 = current hour, 23 = 24 hours ago)
+            # Positive keywords indicating actual file processing
+            keywords = ["ingest", "processed", "added", "chunk", "success", "complete", "queued"]
+            # More specific patterns that indicate actual file activity
+            specific_patterns = ["ingested", "✓", "✅", "files processed", "file processed"]
+
+            if not any(kw in msg_lower for kw in keywords) and not any(p in entry.message for p in specific_patterns):
+                continue
+
+            # Calculate which hour bucket (0 = current hour, 47 = 48 hours ago)
             hours_ago = int((now - entry.timestamp).total_seconds() / 3600)
-            if hours_ago < 0 or hours_ago >= 24:
+            if hours_ago < 0 or hours_ago >= 48:
                 continue
 
             data = self._hourly_data[hours_ago]
@@ -88,6 +105,9 @@ class HistoryPanel(Static):
             if data["last_time"] is None or entry.timestamp > data["last_time"]:
                 data["last_time"] = entry.timestamp
                 data["last_file"] = self._extract_filename(entry.message) or entry.message[:50]
+
+        # Source 2: database_metadata.json ingestion history (captures watcher activity)
+        self._add_metadata_history(cutoff, now)
 
     def _extract_filename(self, message: str) -> Optional[str]:
         """Extract filename from log message."""
@@ -108,6 +128,63 @@ class HistoryPanel(Static):
 
         return None
 
+    def _add_metadata_history(self, cutoff: datetime, now: datetime) -> None:
+        """Add history from database_metadata.json files for watcher activity."""
+        try:
+            # Get the registry to find database paths
+            from src.database_registry import get_registry
+            registry = get_registry()
+
+            entries = registry.list_all()
+            # Handle both dict and list formats
+            if isinstance(entries, dict):
+                entry_list = list(entries.values())
+            else:
+                entry_list = entries
+
+            for entry in entry_list:
+                name = entry.name
+                # Skip if filtering to a different database
+                if self.filter_database and name != self.filter_database:
+                    continue
+
+                # Check for metadata file
+                metadata_path = Path(entry.path) / "database_metadata.json"
+                if not metadata_path.exists():
+                    continue
+
+                try:
+                    with open(metadata_path, 'r') as f:
+                        metadata = json.load(f)
+
+                    # Look for ingestion history in metadata
+                    ingestion_history = metadata.get("ingestion_history", [])
+                    for record in ingestion_history:
+                        try:
+                            timestamp = datetime.fromisoformat(record.get("timestamp", ""))
+                            if timestamp < cutoff:
+                                continue
+
+                            hours_ago = int((now - timestamp).total_seconds() / 3600)
+                            if hours_ago < 0 or hours_ago >= 48:
+                                continue
+
+                            data = self._hourly_data[hours_ago]
+                            data["count"] += record.get("files_count", 1)
+                            data["databases"].add(name)
+
+                            if data["last_time"] is None or timestamp > data["last_time"]:
+                                data["last_time"] = timestamp
+                                data["last_file"] = record.get("last_file", "watcher activity")
+                        except (ValueError, KeyError):
+                            continue
+
+                except (json.JSONDecodeError, IOError):
+                    continue
+        except Exception:
+            # Silently fail if registry not available
+            pass
+
     def refresh_display(self) -> None:
         """Refresh the panel display."""
         now = datetime.now()
@@ -127,11 +204,29 @@ class HistoryPanel(Static):
 
         total_files = 0
         active_hours = 0
+        rows_shown = 0
+        max_rows = 30  # Show up to 30 most recent entries
 
-        # Show hours in order (current hour first)
-        for hours_ago in range(24):
+        # Collect all hour data first to count totals
+        for hours_ago in range(48):
+            data = self._hourly_data.get(hours_ago, {"count": 0})
+            count = data.get("count", 0)
+            total_files += count
+            if count > 0:
+                active_hours += 1
+
+        # Show hours in order (current hour first), limited to 30 rows
+        for hours_ago in range(48):
+            if rows_shown >= max_rows:
+                break
+
             data = self._hourly_data.get(hours_ago, {"count": 0})
             hour_start = data.get("hour_start", now - timedelta(hours=hours_ago))
+            count = data.get("count", 0)
+
+            # Skip hours with no activity after first 6 hours
+            if hours_ago >= 6 and count == 0:
+                continue
 
             # Format hour label
             if hours_ago == 0:
@@ -145,11 +240,7 @@ class HistoryPanel(Static):
             else:
                 hour_label = hour_start.strftime("%m/%d %H:00")
 
-            count = data.get("count", 0)
-            total_files += count
-
             if count > 0:
-                active_hours += 1
                 status = "[green]●[/green]"  # Active
                 count_str = f"[green]{count}[/green]"
 
@@ -165,23 +256,16 @@ class HistoryPanel(Static):
                 count_str = "[dim]-[/dim]"
                 last_display = "[dim]No activity[/dim]"
 
-            # Only show first 12 hours in compact view, or all if there's activity
-            if hours_ago < 12 or count > 0:
-                table.add_row(hour_label, status, count_str, last_display)
-
-        # Summary
-        summary = Text()
-        summary.append(f"\n📈 {total_files} files", style="bold")
-        summary.append(f" in ", style="dim")
-        summary.append(f"{active_hours}/24 hours", style="bold cyan")
+            table.add_row(hour_label, status, count_str, last_display)
+            rows_shown += 1
 
         from rich.box import SIMPLE
         self.update(Panel(
             table,
             border_style="dim",
             box=SIMPLE,
-            title="24-Hour Processing Timeline",
-            subtitle=f"[dim]{self.filter_database or 'All databases'} | ● active ○ idle[/dim]"
+            title=f"Processing Timeline | [bold green]{total_files} files[/bold green] processed in {active_hours} hours",
+            subtitle=f"[dim]{self.filter_database or 'All databases'} | ● active ○ idle | 48h window[/dim]"
         ))
 
     def set_filter(self, db_name: Optional[str]) -> None:
@@ -192,5 +276,7 @@ class HistoryPanel(Static):
 
     def watch_filter_database(self, old_value: str | None, new_value: str | None) -> None:
         """Called when filter changes."""
-        self._compute_24h_timeline()
-        self.refresh_display()
+        # Only recompute if we have entries
+        if self.entries:
+            self._compute_24h_timeline()
+            self.refresh_display()

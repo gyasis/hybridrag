@@ -1601,6 +1601,8 @@ Examples:
                                help='Refresh interval in seconds (default: 2)')
     monitor_parser.add_argument('--new', '-n', action='store_true',
                                help='Start with new database wizard')
+    monitor_parser.add_argument('--mouse', '-m', action='store_true',
+                               help='Enable mouse support (disabled by default to prevent terminal issues)')
 
     # ========================================
     # Database Registry Commands
@@ -1692,8 +1694,9 @@ def run_monitor_command(args):
 
     refresh_interval = getattr(args, 'refresh', 2)
     start_wizard = getattr(args, 'new', False)
+    mouse = getattr(args, 'mouse', False)
 
-    run_monitor(refresh_interval=refresh_interval, start_wizard=start_wizard)
+    run_monitor(refresh_interval=refresh_interval, start_wizard=start_wizard, mouse=mouse)
     return 0
 
 

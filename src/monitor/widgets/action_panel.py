@@ -15,7 +15,7 @@ from rich.box import SIMPLE
 from ..data_collector import DatabaseStats
 
 
-class ActionPanel(Static):
+class ActionPanel(Static, can_focus=True):
     """
     Panel showing available actions for the selected database.
 

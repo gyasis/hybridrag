@@ -20,7 +20,7 @@ from rich.box import SIMPLE
 from ..data_collector import DatabaseStats
 
 
-class SourceFilesPanel(Static):
+class SourceFilesPanel(Static, can_focus=True):
     """
     Panel showing source files and their last modified times.
 
@@ -31,10 +31,11 @@ class SourceFilesPanel(Static):
     """
 
     database: reactive[DatabaseStats | None] = reactive(None)
-    max_files: int = 15
+    max_files: int = 50  # Show more files (was 15)
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self._total_files: int = 0  # Track total for display
 
     def _get_source_files(self, source_folder: str) -> List[dict]:
         """Get files from source folder with metadata."""
@@ -64,6 +65,7 @@ class SourceFilesPanel(Static):
 
         # Sort by modified time (most recent first)
         files.sort(key=lambda f: f["modified"], reverse=True)
+        self._total_files = len(files)  # Track total before limiting
         return files[:self.max_files]
 
     def _humanize_size(self, size_bytes: int) -> str:
@@ -153,9 +155,15 @@ class SourceFilesPanel(Static):
         if len(source_short) > 40:
             source_short = "..." + source_short[-37:]
 
+        # Show total vs displayed count
+        if self._total_files > len(files):
+            title = f"Source Files ({len(files)} of {self._total_files})"
+        else:
+            title = f"Source Files ({len(files)} total)"
+
         return Panel(
             table,
-            title=f"Source Files ({len(files)} shown)",
+            title=title,
             subtitle=f"[dim]{source_short}[/dim]",
             border_style="dim",
             box=SIMPLE

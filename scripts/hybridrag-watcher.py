@@ -22,9 +22,11 @@ import sys
 import signal
 import time
 import logging
+import hashlib
+import json
 from pathlib import Path
 from datetime import datetime
-from typing import Set, Optional
+from typing import Set, Optional, Dict
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -33,6 +35,7 @@ from src.database_registry import (
     get_registry, DatabaseEntry,
     get_watcher_pid_file, get_watcher_lock_file
 )
+from src.alerting import get_alert_manager, AlertSeverity
 
 # Configure logging
 logging.basicConfig(
@@ -53,7 +56,8 @@ class FileChangeDetector:
         self,
         folder: str,
         recursive: bool = True,
-        extensions: Optional[list] = None
+        extensions: Optional[list] = None,
+        specstory_only: bool = False
     ):
         """
         Initialize the change detector.
@@ -62,16 +66,26 @@ class FileChangeDetector:
             folder: Root folder to watch
             recursive: Watch subdirectories
             extensions: Optional list of file extensions to track
+            specstory_only: Only watch .specstory folders (for specstory source type)
         """
         self.folder = Path(folder)
         self.recursive = recursive
         self.extensions = set(extensions) if extensions else None
+        self.specstory_only = specstory_only
         self.last_check: Optional[float] = None
         self.known_files: Set[Path] = set()
         self.file_mtimes: dict = {}
 
     def should_include(self, path: Path) -> bool:
-        """Check if a file should be included based on extension filter."""
+        """Check if a file should be included based on filters."""
+        # Check specstory folder filter first
+        if self.specstory_only:
+            # Only include files that are in a .specstory folder path
+            path_parts = path.parts
+            if not any(part == '.specstory' for part in path_parts):
+                return False
+
+        # Then check extension filter
         if self.extensions is None:
             return True
         return path.suffix.lower() in self.extensions
@@ -157,9 +171,41 @@ class WatcherDaemon:
         self.running = False
         self.pid_file: Optional[Path] = None
         self.lock_file: Optional[Path] = None
+        self.ingested_hashes: Set[str] = set()  # Track content hashes we've ingested
+        self.stats = {
+            "total_ingested": 0,
+            "duplicates_skipped": 0,
+            "errors": 0,
+            "last_error": None,
+        }
+        self.alert_manager = get_alert_manager()
 
-        # Load database entry
+        # Load database entry (must be done first)
         self._load_entry()
+
+    def _load_ingested_hashes(self):
+        """Load existing document hashes from the database's doc_status store."""
+        doc_status_path = Path(self.entry.path) / "kv_store_doc_status.json"
+        if doc_status_path.exists():
+            try:
+                with open(doc_status_path, 'r') as f:
+                    doc_status = json.load(f)
+                # Extract document hashes (doc-{hash} format)
+                for doc_id in doc_status.keys():
+                    if doc_id.startswith("doc-"):
+                        self.ingested_hashes.add(doc_id[4:])  # Remove "doc-" prefix
+                logger.info(f"Loaded {len(self.ingested_hashes)} existing document hashes")
+            except Exception as e:
+                logger.warning(f"Could not load doc status: {e}")
+
+    def _content_hash(self, content: str) -> str:
+        """Generate MD5 hash of content (matching LightRAG's approach)."""
+        return hashlib.md5(content.encode()).hexdigest()
+
+    def _is_duplicate(self, content: str) -> bool:
+        """Check if content has already been ingested."""
+        content_hash = self._content_hash(content)
+        return content_hash in self.ingested_hashes
 
     def _load_entry(self):
         """Load database entry from registry."""
@@ -177,16 +223,28 @@ class WatcherDaemon:
         self.lock_file = get_watcher_lock_file(self.db_name)
 
         # Initialize change detector
+        # Use extensions from config, or default to .md if not specified
+        extensions = self.entry.file_extensions if self.entry.file_extensions else ['.md']
+        logger.info(f"  File extensions from config: {self.entry.file_extensions}")
+        # For specstory source type, only watch .specstory folders
+        specstory_only = (self.entry.source_type == 'specstory')
         self.detector = FileChangeDetector(
             folder=self.entry.source_folder,
             recursive=self.entry.recursive,
-            extensions=self.entry.file_extensions
+            extensions=extensions,
+            specstory_only=specstory_only
         )
 
         logger.info(f"Loaded database entry: {self.db_name}")
         logger.info(f"  Source: {self.entry.source_folder}")
         logger.info(f"  Interval: {self.entry.watch_interval}s")
         logger.info(f"  Recursive: {self.entry.recursive}")
+        logger.info(f"  Source type: {self.entry.source_type}")
+        logger.info(f"  SpecStory only: {specstory_only}")
+        logger.info(f"  Extensions: {extensions}")
+
+        # Load existing document hashes from database
+        self._load_ingested_hashes()
 
     def _write_pid(self):
         """Write PID file."""
@@ -222,7 +280,7 @@ class WatcherDaemon:
         if not all_changed:
             return
 
-        logger.info(f"Ingesting {len(all_changed)} changed file(s)")
+        logger.info(f"Processing {len(all_changed)} changed file(s)")
 
         # Import here to avoid circular imports
         from config.config import HybridRAGConfig
@@ -240,22 +298,77 @@ class WatcherDaemon:
             core = HybridLightRAGCore(config)
             await core._ensure_initialized()
 
+            ingested_count = 0
+            skipped_count = 0
+            error_count = 0
+
             # Ingest each changed file
             for file_path in all_changed:
                 try:
                     content = file_path.read_text(encoding='utf-8', errors='ignore')
-                    if content.strip():
-                        await core.insert(content)
-                        logger.info(f"  Ingested: {file_path.name}")
+                    if not content.strip():
+                        logger.debug(f"  Skipped empty file: {file_path.name}")
+                        continue
+
+                    # Check for duplicate content
+                    content_hash = self._content_hash(content)
+                    if content_hash in self.ingested_hashes:
+                        logger.debug(f"  Skipped duplicate: {file_path.name}")
+                        skipped_count += 1
+                        self.stats["duplicates_skipped"] += 1
+                        continue
+
+                    # Ingest the file
+                    success = await core.ainsert(content, str(file_path))
+                    if success:
+                        self.ingested_hashes.add(content_hash)
+                        ingested_count += 1
+                        self.stats["total_ingested"] += 1
+                        logger.info(f"  ✓ Ingested: {file_path.name}")
+                    else:
+                        error_count += 1
+                        self.stats["errors"] += 1
+                        logger.error(f"  ✗ Failed: {file_path.name}")
+
                 except Exception as e:
-                    logger.error(f"  Failed to ingest {file_path.name}: {e}")
+                    error_count += 1
+                    self.stats["errors"] += 1
+                    self.stats["last_error"] = f"{file_path.name}: {str(e)}"
+                    logger.error(f"  ✗ Error ingesting {file_path.name}: {e}")
+                    # Create alert for failed ingestion
+                    self.alert_manager.alert_ingestion_failed(
+                        self.db_name,
+                        file_path.name,
+                        str(e),
+                        {"file_path": str(file_path)}
+                    )
 
             # Update last_sync in registry
             self.registry.update_last_sync(self.db_name)
-            logger.info("Ingestion complete")
+
+            # Log summary
+            logger.info(f"Batch complete: +{ingested_count} ingested, ~{skipped_count} duplicates skipped, ✗{error_count} errors")
+            logger.info(f"Session totals: {self.stats['total_ingested']} ingested, {self.stats['duplicates_skipped']} skipped, {self.stats['errors']} errors")
+
+            # Create alert if there were errors in the batch
+            if error_count > 0:
+                self.alert_manager.alert_ingestion_partial(
+                    self.db_name,
+                    total=len(all_changed),
+                    failed=error_count,
+                    {"ingested": ingested_count, "skipped": skipped_count}
+                )
 
         except Exception as e:
-            logger.error(f"Ingestion failed: {e}")
+            self.stats["errors"] += 1
+            self.stats["last_error"] = str(e)
+            logger.error(f"Ingestion batch failed: {e}")
+            # Create critical alert for batch failure
+            self.alert_manager.alert_watcher_error(
+                self.db_name,
+                f"Batch ingestion failed: {str(e)}",
+                {"files_attempted": len(all_changed)}
+            )
 
     async def run(self):
         """Run the watcher daemon loop."""
@@ -290,9 +403,22 @@ class WatcherDaemon:
 
         except Exception as e:
             logger.error(f"Watcher error: {e}")
+            # Alert on unexpected watcher crash
+            self.alert_manager.alert_watcher_stopped(
+                self.db_name,
+                f"Unexpected error: {str(e)}",
+                {"error": str(e), "stats": self.stats}
+            )
         finally:
             self._cleanup_pid()
             logger.info("Watcher stopped")
+            # Alert on watcher stop (graceful or not)
+            if self.stats["errors"] > 0:
+                self.alert_manager.alert_info(
+                    self.db_name,
+                    f"Watcher stopped with {self.stats['errors']} total errors",
+                    self.stats
+                )
 
 
 def main():

@@ -46,6 +46,9 @@ class HybridRAGMonitor(App):
     TITLE = "HybridRAG Monitor"
     SUB_TITLE = "Database & Watcher Management"
 
+    # Disable mouse to prevent terminal lock-up issues in WSL/some terminals
+    ENABLE_COMMAND_PALETTE = False
+
     CSS = """
     Screen {
         background: $surface;
@@ -93,13 +96,14 @@ class HybridRAGMonitor(App):
         self.notify("Database creation cancelled", severity="warning")
 
 
-def run_monitor(refresh_interval: int = 2, start_wizard: bool = False) -> None:
+def run_monitor(refresh_interval: int = 2, start_wizard: bool = False, mouse: bool = False) -> None:
     """
     Run the HybridRAG monitor application.
 
     Args:
         refresh_interval: Seconds between auto-refresh (default: 2)
         start_wizard: If True, open wizard immediately
+        mouse: Enable mouse support (default: False to prevent terminal lock-up)
     """
     # Register cleanup to ensure mouse tracking is disabled on exit
     atexit.register(_reset_terminal_mouse)
@@ -109,7 +113,8 @@ def run_monitor(refresh_interval: int = 2, start_wizard: bool = False) -> None:
         start_wizard=start_wizard
     )
     try:
-        app.run()
+        # Disable mouse to prevent terminal lock-up in WSL/some terminals
+        app.run(mouse=mouse)
     finally:
         # Also call directly in case atexit doesn't fire
         _reset_terminal_mouse()
@@ -130,6 +135,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Start with new database wizard"
     )
+    parser.add_argument(
+        "--mouse", "-m",
+        action="store_true",
+        help="Enable mouse support (disabled by default to prevent terminal issues)"
+    )
 
     args = parser.parse_args()
-    run_monitor(refresh_interval=args.refresh, start_wizard=args.new)
+    run_monitor(refresh_interval=args.refresh, start_wizard=args.new, mouse=args.mouse)

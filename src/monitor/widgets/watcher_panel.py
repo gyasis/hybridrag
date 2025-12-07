@@ -15,7 +15,7 @@ from rich.box import SIMPLE
 from ..data_collector import DatabaseStats
 
 
-class WatcherPanel(Static):
+class WatcherPanel(Static, can_focus=True):
     """
     Panel displaying watcher details for the selected database.
 

@@ -59,13 +59,24 @@ class DatabaseTable(DataTable):
 
     def update_databases(self, databases: list[DatabaseStats]) -> None:
         """Update table with new database stats."""
+        # Remember currently selected database before clearing
+        selected_db_name = None
+        if self.cursor_row is not None and self.row_count > 0:
+            try:
+                row_key = self.get_row_at(self.cursor_row)
+                if row_key:
+                    selected_db_name = row_key.value
+            except Exception:
+                pass
+
         # Store for later access
         self._databases = {db.name: db for db in databases}
 
         # Clear and repopulate
         self.clear()
 
-        for db in databases:
+        selected_row_index = None
+        for idx, db in enumerate(databases):
             # Status icon
             if not db.exists:
                 status = Text("🔴 GONE", style="red")
@@ -88,6 +99,10 @@ class DatabaseTable(DataTable):
             entities = f"{db.entity_count:,}" if db.entity_count else "-"
             relations = f"{db.relation_count:,}" if db.relation_count else "-"
 
+            # Track index if this is the previously selected database
+            if db.name == selected_db_name:
+                selected_row_index = idx
+
             self.add_row(
                 db.name,
                 status,
@@ -98,6 +113,19 @@ class DatabaseTable(DataTable):
                 watcher,
                 key=db.name
             )
+
+        # Restore cursor position to previously selected database
+        if selected_row_index is not None and self.row_count > 0:
+            self.move_cursor(row=selected_row_index)
+        elif self.row_count > 0:
+            # Auto-select first database if none was selected
+            self.move_cursor(row=0)
+
+        # Get the database directly from the index since cursor_row may not be updated yet
+        target_row = selected_row_index if selected_row_index is not None else 0
+        if databases and target_row < len(databases):
+            db = databases[target_row]
+            self.post_message(self.DatabaseSelected(db))
 
     def get_selected_database(self) -> DatabaseStats | None:
         """Get the currently selected database."""

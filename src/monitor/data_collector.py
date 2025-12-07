@@ -149,13 +149,15 @@ def parse_database_metadata(db_path: Path) -> Dict[str, int]:
     """Parse database metadata for entity/relation counts.
 
     Uses fast methods first:
-    1. Parse log files for 'Loaded graph ... with X nodes, Y edges'
+    1. Parse log files for 'Loaded graph ... with X nodes, Y edges' (only if they reference this db_path)
     2. Count keys in kv_store JSON files (fast dict length)
     3. Read graphml file only as last resort (can be 100MB+)
     """
     counts = {"entities": 0, "relations": 0, "chunks": 0}
+    db_path_str = str(db_path.resolve())
 
     # Method 1: Try to find counts in recent log files (fastest)
+    # IMPORTANT: Only use log entries that explicitly reference this database's path
     log_dir = Path(__file__).parent.parent.parent / "logs"
     if log_dir.exists():
         try:
@@ -164,6 +166,9 @@ def parse_database_metadata(db_path: Path) -> Dict[str, int]:
                 try:
                     with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
                         content = f.read()
+                        # Verify this log file is for our specific database
+                        if db_path_str not in content and db_path.name not in content:
+                            continue
                         # Look for: "Loaded graph ... with 44990 nodes, 80123 edges"
                         match = re.search(r'Loaded graph.*?with\s+(\d+)\s+nodes?,\s*(\d+)\s+edges?', content)
                         if match:
@@ -315,6 +320,10 @@ LOG_PATTERNS = [
     re.compile(r'\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]\s*(.+)'),
     # Format: 2025-12-06 17:23:47,421 - module - LEVEL - message
     re.compile(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d+ - .+ - (INFO|WARNING|ERROR|DEBUG) - (.+)'),
+    # Format: INFO: [module] message (LightRAG format)
+    re.compile(r'(INFO|WARNING|ERROR|DEBUG):\s*\[([^\]]+)\]\s*(.+)'),
+    # Format: 2025-12-06 17:24:11 - message (simple timestamp)
+    re.compile(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+-\s+(.+)'),
 ]
 
 def parse_log_line(line: str, default_db: str = "system") -> Optional[LogEntry]:
@@ -349,6 +358,24 @@ def parse_log_line(line: str, default_db: str = "system") -> Optional[LogEntry]:
             except ValueError:
                 timestamp = datetime.now()
             level = level_str
+        else:
+            # Try third pattern: INFO: [module] message (LightRAG format)
+            match = LOG_PATTERNS[2].match(line)
+            if match:
+                level_str, module, message = match.groups()
+                level = level_str
+                timestamp = datetime.now()  # LightRAG logs often don't have timestamps
+                # Include module in message for context
+                message = f"[{module}] {message}"
+            else:
+                # Try fourth pattern: 2025-12-06 17:24:11 - message
+                match = LOG_PATTERNS[3].match(line)
+                if match:
+                    timestamp_str, message = match.groups()
+                    try:
+                        timestamp = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
+                    except ValueError:
+                        timestamp = datetime.now()
 
     if not timestamp or not message:
         return None
@@ -361,8 +388,21 @@ def parse_log_line(line: str, default_db: str = "system") -> Optional[LogEntry]:
         potential_db = parts[0].strip()
         if potential_db and " " not in potential_db and len(potential_db) < 30:
             # Skip common prefixes that aren't database names
-            skip_prefixes = ["SUCCESS", "FAILED", "INFO", "WARNING", "ERROR", "DEBUG", "src", "nano-vectordb"]
-            if potential_db not in skip_prefixes:
+            skip_prefixes = [
+                # Log levels
+                "SUCCESS", "FAILED", "INFO", "WARNING", "ERROR", "DEBUG", "CRITICAL",
+                # Common module/path prefixes
+                "src", "nano-vectordb", "lightrag", "hybridrag", "http", "https",
+                # Common log message starters
+                "File", "Path", "Processing", "Loading", "Saving", "Starting", "Stopping",
+                "Created", "Updated", "Deleted", "Found", "Missing", "Added", "Removed",
+                "Exception", "Traceback", "Error", "Warning", "Note",
+                # Time-related
+                "Elapsed", "Duration", "Time", "Timestamp",
+            ]
+            # Also skip if it looks like a path component or number
+            skip_patterns = potential_db.startswith(("/", ".", "[")) or potential_db.isdigit()
+            if potential_db not in skip_prefixes and not skip_patterns:
                 db_name = potential_db
                 message = parts[1].strip()
 
@@ -384,6 +424,41 @@ def parse_log_line(line: str, default_db: str = "system") -> Optional[LogEntry]:
     )
 
 
+def _build_path_to_db_map() -> Dict[str, str]:
+    """Build a mapping from database paths to database names from the registry."""
+    path_to_db = {}
+    try:
+        registry = get_registry()
+        entries = registry.list_all()
+        # Handle both dict and list formats
+        if isinstance(entries, dict):
+            entry_list = list(entries.values())
+        else:
+            entry_list = entries
+
+        for entry in entry_list:
+            if entry.path:
+                # Normalize path for matching
+                path_to_db[str(Path(entry.path).resolve())] = entry.name
+                # Also add the raw path
+                path_to_db[entry.path] = entry.name
+    except Exception:
+        pass
+    return path_to_db
+
+
+def _extract_db_from_log_content(file_lines: List[str], path_to_db: Dict[str, str]) -> str:
+    """Extract database name from log content by matching paths to registry entries."""
+    # Look for working directory patterns in the log content
+    for line in file_lines[:50]:  # Check first 50 lines for working dir
+        # Match patterns like "working dir: /path/to/db" or "Working directory: /path/to/db"
+        # Also match paths in general context
+        for path, db_name in path_to_db.items():
+            if path in line:
+                return db_name
+    return "system"
+
+
 def get_recent_logs(
     db_name: Optional[str] = None,
     lines: int = 50,
@@ -397,6 +472,9 @@ def get_recent_logs(
 
     if not log_dir.exists():
         return entries
+
+    # Build path-to-database mapping from registry
+    path_to_db = _build_path_to_db_map()
 
     # Collect log files
     log_files = []
@@ -422,7 +500,17 @@ def get_recent_logs(
         try:
             with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
                 file_lines = f.readlines()[-100:]  # Last 100 lines per file
-                default_db = log_file.stem.replace("watcher_", "").replace("ingestion_", "").split("_")[0]
+
+                # Determine default database name
+                # First try: watcher_<dbname>.log format
+                if log_file.stem.startswith("watcher_"):
+                    default_db = log_file.stem.replace("watcher_", "").split("_")[0]
+                # Second try: Look for database path in log content
+                elif path_to_db:
+                    default_db = _extract_db_from_log_content(file_lines, path_to_db)
+                else:
+                    default_db = "system"
+
                 for line in file_lines:
                     entry = parse_log_line(line, default_db)
                     if entry:
@@ -432,9 +520,10 @@ def get_recent_logs(
         except (OSError, IOError):
             pass
 
-    # Sort by timestamp (newest first) and limit
+    # Sort by timestamp (oldest first so newest appear at bottom when displayed)
     all_lines.sort(key=lambda e: e.timestamp, reverse=True)
-    return all_lines[:lines]
+    # Take newest entries, then reverse so oldest is first (newest at bottom)
+    return list(reversed(all_lines[:lines]))
 
 
 def get_watcher_process_info(pid: int) -> Optional[Dict[str, Any]]:
