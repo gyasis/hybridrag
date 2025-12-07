@@ -23,6 +23,7 @@ from src.monitor.widgets.watcher_panel import WatcherPanel
 from src.monitor.widgets.activity_log import ActivityLog
 from src.monitor.widgets.action_panel import ActionPanel
 from src.monitor.widgets.status_bar import StatusBar
+from src.monitor.widgets.history_panel import HistoryPanel
 
 
 class DashboardScreen(Screen):
@@ -56,6 +57,7 @@ class DashboardScreen(Screen):
         Binding("y", "force_sync", "Sync"),
         Binding("l", "view_logs", "Logs"),
         Binding("t", "toggle_log_scope", "Toggle Logs"),
+        Binding("h", "toggle_history", "History"),
         Binding("i", "show_info", "Info"),
     ]
 
@@ -104,6 +106,17 @@ class DashboardScreen(Screen):
     }
 
     #log-section {
+        layout: grid;
+        grid-size: 2 1;
+        grid-columns: 1fr 1fr;
+        height: 100%;
+    }
+
+    #activity-log {
+        height: 100%;
+    }
+
+    #history-panel {
         height: 100%;
     }
 
@@ -129,6 +142,10 @@ class DashboardScreen(Screen):
     ActivityLog {
         height: 100%;
         border: solid $primary;
+    }
+
+    HistoryPanel {
+        height: 100%;
     }
 
     .hidden {
@@ -166,9 +183,10 @@ class DashboardScreen(Screen):
                 id="middle-section"
             ),
 
-            # Activity log section
-            Container(
+            # Activity log + History section (side by side)
+            Horizontal(
                 ActivityLog(id="activity-log"),
+                HistoryPanel(id="history-panel"),
                 id="log-section"
             ),
 
@@ -208,6 +226,10 @@ class DashboardScreen(Screen):
             # Update activity log
             log = self.query_one("#activity-log", ActivityLog)
             log.update_entries(snapshot.recent_logs)
+
+            # Update history panel
+            history = self.query_one("#history-panel", HistoryPanel)
+            history.update_entries(snapshot.recent_logs)
 
         except Exception as e:
             self.notify(f"Refresh error: {e}", severity="error")
@@ -336,3 +358,19 @@ class DashboardScreen(Screen):
                 info_lines.append(f"  - {err}")
 
         self.notify("\n".join(info_lines), title=f"Database: {db.name}")
+
+    def action_toggle_history(self) -> None:
+        """Toggle history panel filter for selected database."""
+        history = self.query_one("#history-panel", HistoryPanel)
+
+        if history.filter_database:
+            # Switch to all databases
+            history.set_filter(None)
+            self.notify("History: showing all databases")
+        else:
+            # Filter to selected database
+            if self.selected_database:
+                history.set_filter(self.selected_database.name)
+                self.notify(f"History: showing {self.selected_database.name}")
+            else:
+                self.notify("Select a database to filter history", severity="warning")
