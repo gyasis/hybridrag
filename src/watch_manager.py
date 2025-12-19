@@ -22,7 +22,7 @@ from enum import Enum, auto
 
 from .database_registry import (
     DatabaseRegistry, DatabaseEntry,
-    get_registry, get_watcher_pid_file, get_watcher_lock_file,
+    get_registry, get_watcher_pid_file,
     is_watcher_running
 )
 
@@ -143,13 +143,14 @@ class WatchManager:
                 return self._start_legacy_watcher(entry, legacy_script)
             return False, f"Watcher script not found: {self.WATCHER_SCRIPT}"
 
-        pid_file = get_watcher_pid_file(entry.name)
         log_dir = self.HYBRIDRAG_DIR / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         log_file = log_dir / f"watcher_{entry.name}.log"
 
         try:
             # Start the watcher process
+            # Note: The watcher script handles PID file creation with proper flock locking
+            # to prevent race conditions. We do NOT write the PID file here.
             with open(log_file, 'a') as log:
                 proc = subprocess.Popen(
                     [sys.executable, str(self.WATCHER_SCRIPT), entry.name],
@@ -157,10 +158,6 @@ class WatchManager:
                     stderr=log,
                     start_new_session=True
                 )
-
-            # Write PID file
-            pid_file.parent.mkdir(parents=True, exist_ok=True)
-            pid_file.write_text(str(proc.pid))
 
             logger.info(f"Started watcher for {entry.name} (PID: {proc.pid})")
             return True, f"Started watcher (PID: {proc.pid})"

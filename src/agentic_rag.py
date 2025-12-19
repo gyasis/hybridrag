@@ -13,11 +13,19 @@ import asyncio
 import time
 import json
 import logging
+import random
 from typing import Dict, List, Optional, Any, Literal
 from dataclasses import dataclass, field
 
 from promptchain import PromptChain
 from promptchain.utils.agentic_step_processor import AgenticStepProcessor
+
+# Import retry utilities from lightrag_core
+from src.lightrag_core import (
+    is_transient_error,
+    calculate_backoff_with_jitter,
+    LITELLM_MAX_RETRIES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -658,32 +666,56 @@ Strategy:
         """
         Execute chain with circuit breaker pattern to prevent infinite loops.
 
+        Only retries transient errors (429, 5xx). Non-retryable errors (401, 400, 403)
+        are raised immediately without consuming retry attempts.
+
         Args:
             chain: The PromptChain to execute
             query: The query input
-            max_failures: Maximum allowed failures
+            max_failures: Maximum allowed transient failures before circuit breaker opens
 
         Returns:
             Result string from chain execution
+
+        Raises:
+            Exception: If a non-retryable error occurs or max_failures exceeded
         """
-        failures = 0
+        transient_failures = 0
         last_error = None
 
-        while failures < max_failures:
+        while transient_failures < max_failures:
             try:
                 result = await chain.process_prompt_async(query)
                 return result
             except Exception as e:
-                failures += 1
                 last_error = e
-                logger.warning(f"Circuit breaker attempt {failures}/{max_failures} failed: {e}")
 
-                if failures < max_failures:
-                    # Brief backoff before retry
-                    await asyncio.sleep(min(2 ** failures, 10))  # Exponential backoff, max 10s
+                # Check if error is transient (retryable)
+                if not is_transient_error(e):
+                    # Non-retryable error (401, 400, 403, etc.) - fail immediately
+                    logger.error(
+                        f"Circuit breaker: Non-retryable error, failing immediately: {e}"
+                    )
+                    raise
 
-        # Circuit breaker opened - all retries failed
-        raise Exception(f"Circuit breaker opened after {max_failures} failures. Last error: {last_error}")
+                # Transient error - count it and potentially retry
+                transient_failures += 1
+                logger.warning(
+                    f"Circuit breaker: Transient error "
+                    f"(attempt {transient_failures}/{max_failures}): {e}"
+                )
+
+                if transient_failures < max_failures:
+                    # Exponential backoff with jitter before retry
+                    backoff = calculate_backoff_with_jitter(transient_failures - 1)
+                    logger.info(f"Circuit breaker: Retrying in {backoff:.2f}s...")
+                    await asyncio.sleep(backoff)
+
+        # Circuit breaker opened - all retries exhausted for transient errors
+        raise Exception(
+            f"Circuit breaker opened after {max_failures} transient failures. "
+            f"Last error: {last_error}"
+        )
 
 
 def create_agentic_rag(lightrag_core, model_name: str = "azure/gpt-4.1", **kwargs) -> AgenticHybridRAG:

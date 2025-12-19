@@ -13,6 +13,7 @@ Supports multiple source types:
 - schema: Database schema extraction (Snowflake, Athena, etc.)
 """
 
+import fcntl
 import os
 import re
 from pathlib import Path
@@ -658,13 +659,109 @@ def get_watcher_pid_file(db_name: str) -> Path:
 
 
 def get_watcher_lock_file(db_name: str) -> Path:
-    """Get the path to a watcher's lock file."""
-    return DatabaseRegistry.DEFAULT_DIR / "locks" / f"{db_name}.lock"
+    """Get the path to a watcher's lock file (same as PID file for flock)."""
+    # Lock file is now the same as PID file - we use flock on the PID file itself
+    return get_watcher_pid_file(db_name)
+
+
+def acquire_watcher_lock(db_name: str, pid: int) -> Optional[int]:
+    """
+    Acquire exclusive lock on the watcher PID file and write PID.
+
+    Uses fcntl.flock() to prevent race conditions when starting watchers.
+    The lock is held for the lifetime of the file descriptor.
+
+    Args:
+        db_name: Database name
+        pid: Process ID to write
+
+    Returns:
+        File descriptor (must be kept open to maintain lock) or None if lock failed
+    """
+    pid_file = get_watcher_pid_file(db_name)
+    pid_file.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        # Open file for read/write, create if doesn't exist
+        fd = os.open(str(pid_file), os.O_RDWR | os.O_CREAT, 0o644)
+
+        try:
+            # Try to acquire exclusive lock (non-blocking)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (IOError, OSError):
+            # Lock already held by another process
+            os.close(fd)
+            return None
+
+        # We have the lock - write our PID
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(fd, f"{pid}\n".encode())
+        os.fsync(fd)
+
+        # Return fd - caller must keep it open to maintain lock
+        return fd
+
+    except OSError as e:
+        # Failed to open/create file
+        return None
+
+
+def release_watcher_lock(fd: int, db_name: str) -> None:
+    """
+    Release watcher lock and clean up PID file.
+
+    Args:
+        fd: File descriptor returned by acquire_watcher_lock
+        db_name: Database name
+    """
+    if fd is not None:
+        try:
+            # Release lock and close fd
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+        except OSError:
+            pass
+
+    # Clean up PID file
+    pid_file = get_watcher_pid_file(db_name)
+    try:
+        pid_file.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _check_pid_running(pid: int) -> bool:
+    """
+    Check if a process with given PID is running.
+
+    Args:
+        pid: Process ID to check
+
+    Returns:
+        True if process exists and is running, False otherwise
+    """
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        # Process does not exist
+        return False
+    except PermissionError:
+        # Process exists but we don't have permission to signal it
+        # This means the process IS running (owned by different user)
+        return True
+    except OSError:
+        # Other OS error - assume not running
+        return False
 
 
 def is_watcher_running(db_name: str) -> tuple[bool, Optional[int]]:
     """
     Check if a watcher is running for a database.
+
+    Uses both PID file check and flock to determine if watcher is truly running.
+    Handles stale PID files correctly.
 
     Args:
         db_name: Database name
@@ -678,12 +775,48 @@ def is_watcher_running(db_name: str) -> tuple[bool, Optional[int]]:
         return False, None
 
     try:
-        pid = int(pid_file.read_text().strip())
-        # Check if process is running (Unix-specific)
-        os.kill(pid, 0)
-        return True, pid
-    except (ValueError, OSError, ProcessLookupError):
-        # Process not running, clean up stale PID file
+        pid_content = pid_file.read_text().strip()
+        if not pid_content:
+            # Empty PID file - clean it up
+            pid_file.unlink()
+            return False, None
+
+        pid = int(pid_content)
+
+        # Check if process is actually running
+        if _check_pid_running(pid):
+            # Process exists - verify it holds the lock
+            # Try to acquire lock non-blocking
+            try:
+                fd = os.open(str(pid_file), os.O_RDWR, 0o644)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    # We got the lock - process is NOT holding it (stale PID file)
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                    os.close(fd)
+                    # Clean up stale PID file
+                    try:
+                        pid_file.unlink()
+                    except FileNotFoundError:
+                        pass
+                    return False, None
+                except (IOError, OSError):
+                    # Lock is held - watcher is truly running
+                    os.close(fd)
+                    return True, pid
+            except OSError:
+                # Can't open file - check if process is running based on PID alone
+                return _check_pid_running(pid), pid if _check_pid_running(pid) else None
+        else:
+            # Process not running - clean up stale PID file
+            try:
+                pid_file.unlink()
+            except FileNotFoundError:
+                pass
+            return False, None
+
+    except ValueError:
+        # Invalid PID in file - clean up
         try:
             pid_file.unlink()
         except FileNotFoundError:

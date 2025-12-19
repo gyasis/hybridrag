@@ -17,6 +17,7 @@ Date: 2025-12-06
 """
 
 import asyncio
+import gc
 import os
 import sys
 import signal
@@ -26,16 +27,64 @@ import hashlib
 import json
 from pathlib import Path
 from datetime import datetime
-from typing import Set, Optional, Dict
+from typing import Set, Optional, Dict, List
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from collections import OrderedDict
 from src.database_registry import (
     get_registry, DatabaseEntry,
-    get_watcher_pid_file, get_watcher_lock_file
+    get_watcher_pid_file, acquire_watcher_lock, release_watcher_lock,
+    is_watcher_running
 )
 from src.alerting import get_alert_manager, AlertSeverity
+
+
+class BoundedSet:
+    """
+    A set with a maximum size that evicts oldest items when full.
+
+    Uses OrderedDict internally to maintain insertion order and provide
+    O(1) membership testing while bounding memory usage.
+    """
+
+    def __init__(self, max_size: int = 100000):
+        """
+        Initialize bounded set.
+
+        Args:
+            max_size: Maximum number of items to store (default 100000)
+        """
+        self._data: OrderedDict[str, None] = OrderedDict()
+        self._max_size = max_size
+
+    def add(self, item: str) -> None:
+        """Add item to set, evicting oldest if at capacity."""
+        if item in self._data:
+            # Move to end (most recently added)
+            self._data.move_to_end(item)
+            return
+        # Evict oldest items if at capacity
+        while len(self._data) >= self._max_size:
+            self._data.popitem(last=False)
+        self._data[item] = None
+
+    def __contains__(self, item: str) -> bool:
+        return item in self._data
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def clear(self) -> None:
+        """Clear all items."""
+        self._data.clear()
+
+    def update(self, items) -> None:
+        """Add multiple items."""
+        for item in items:
+            self.add(item)
+
 
 # Configure logging
 logging.basicConfig(
@@ -138,6 +187,12 @@ class FileChangeDetector:
 
         # Update tracking
         self.known_files = current_files
+
+        # Clean up file_mtimes for deleted files to prevent memory leak
+        for deleted_path in deleted_files:
+            self.file_mtimes.pop(deleted_path, None)
+
+        # Add mtimes for new files
         for file_path in current_files:
             if file_path not in self.file_mtimes:
                 try:
@@ -155,7 +210,15 @@ class WatcherDaemon:
     Daemon process for watching a registered database.
 
     Polls for file changes and triggers ingestion when changes detected.
+    Uses lazy initialization and batch processing to prevent OOM on large graphs.
     """
+
+    # Maximum files to process in a single batch to prevent OOM
+    BATCH_SIZE = 10
+
+    # Maximum number of content hashes to track (prevents unbounded memory growth)
+    # 100k MD5 hashes = ~3.2MB memory (32 chars * 100k)
+    MAX_INGESTED_HASHES = 100000
 
     def __init__(self, db_name: str):
         """
@@ -170,8 +233,9 @@ class WatcherDaemon:
         self.detector: Optional[FileChangeDetector] = None
         self.running = False
         self.pid_file: Optional[Path] = None
-        self.lock_file: Optional[Path] = None
-        self.ingested_hashes: Set[str] = set()  # Track content hashes we've ingested
+        self._lock_fd: Optional[int] = None  # File descriptor for PID file lock
+        # Use BoundedSet to prevent unbounded memory growth
+        self.ingested_hashes = BoundedSet(max_size=self.MAX_INGESTED_HASHES)
         self.stats = {
             "total_ingested": 0,
             "duplicates_skipped": 0,
@@ -179,6 +243,10 @@ class WatcherDaemon:
             "last_error": None,
         }
         self.alert_manager = get_alert_manager()
+
+        # Reusable core instance - lazy initialized to save memory
+        self._core = None
+        self._config = None
 
         # Load database entry (must be done first)
         self._load_entry()
@@ -220,7 +288,6 @@ class WatcherDaemon:
             raise ValueError(f"Source folder does not exist: {self.entry.source_folder}")
 
         self.pid_file = get_watcher_pid_file(self.db_name)
-        self.lock_file = get_watcher_lock_file(self.db_name)
 
         # Initialize change detector
         # Use extensions from config, or default to .md if not specified
@@ -246,23 +313,72 @@ class WatcherDaemon:
         # Load existing document hashes from database
         self._load_ingested_hashes()
 
-    def _write_pid(self):
-        """Write PID file."""
-        self.pid_file.parent.mkdir(parents=True, exist_ok=True)
-        self.pid_file.write_text(str(os.getpid()))
-        logger.info(f"PID file: {self.pid_file}")
+    def _acquire_lock(self) -> bool:
+        """
+        Acquire exclusive lock on PID file to prevent duplicate daemons.
 
-    def _cleanup_pid(self):
-        """Remove PID file."""
-        if self.pid_file and self.pid_file.exists():
-            self.pid_file.unlink()
-        if self.lock_file and self.lock_file.exists():
-            self.lock_file.unlink()
+        Uses fcntl.flock() for proper file locking. The lock is held for
+        the lifetime of the process (via the file descriptor).
+
+        Returns:
+            True if lock acquired, False if another watcher is running
+        """
+        # Check if already running (with lock verification)
+        running, existing_pid = is_watcher_running(self.db_name)
+        if running:
+            logger.error(f"Watcher already running for {self.db_name} (PID: {existing_pid})")
+            return False
+
+        # Acquire lock and write PID atomically
+        self._lock_fd = acquire_watcher_lock(self.db_name, os.getpid())
+        if self._lock_fd is None:
+            logger.error(f"Failed to acquire lock for {self.db_name} - another instance may be starting")
+            return False
+
+        logger.info(f"PID file: {self.pid_file} (locked)")
+        return True
+
+    def _release_lock(self):
+        """Release PID file lock and clean up."""
+        release_watcher_lock(self._lock_fd, self.db_name)
+        self._lock_fd = None
 
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals."""
         logger.info(f"Received signal {signum}, shutting down...")
         self.running = False
+
+    async def _get_core(self):
+        """
+        Get or create the LightRAG core instance (lazy initialization).
+
+        Reuses the same core instance across batches to avoid reloading
+        the entire graph (56k nodes, 104k edges) on each batch.
+        """
+        if self._core is None:
+            logger.info("Lazy-initializing LightRAG core (first use)...")
+            from config.config import HybridRAGConfig
+            from src.lightrag_core import HybridLightRAGCore
+
+            self._config = HybridRAGConfig()
+            self._config.lightrag.working_dir = self.entry.path
+
+            if self.entry.model:
+                self._config.lightrag.model_name = self.entry.model
+
+            self._core = HybridLightRAGCore(self._config)
+            await self._core._ensure_initialized()
+            logger.info("LightRAG core initialized successfully")
+
+        return self._core
+
+    def _release_core(self):
+        """Release the core instance to free memory if needed."""
+        if self._core is not None:
+            logger.info("Releasing LightRAG core to free memory...")
+            self._core = None
+            self._config = None
+            gc.collect()
 
     async def _ingest_changes(
         self,
@@ -280,83 +396,89 @@ class WatcherDaemon:
         if not all_changed:
             return
 
-        logger.info(f"Processing {len(all_changed)} changed file(s)")
-
-        # Import here to avoid circular imports
-        from config.config import HybridRAGConfig
-        from src.lightrag_core import HybridLightRAGCore
+        total_files = len(all_changed)
+        logger.info(f"Processing {total_files} changed file(s) in batches of {self.BATCH_SIZE}")
 
         try:
-            # Initialize config
-            config = HybridRAGConfig()
-            config.lightrag.working_dir = self.entry.path
-
-            if self.entry.model:
-                config.lightrag.model_name = self.entry.model
-
-            # Initialize core
-            core = HybridLightRAGCore(config)
-            await core._ensure_initialized()
+            # Get or create the reusable core instance (lazy initialization)
+            # This avoids reloading the 56k node graph on every batch
+            core = await self._get_core()
 
             ingested_count = 0
             skipped_count = 0
             error_count = 0
 
-            # Ingest each changed file
-            for file_path in all_changed:
-                try:
-                    content = file_path.read_text(encoding='utf-8', errors='ignore')
-                    if not content.strip():
-                        logger.debug(f"  Skipped empty file: {file_path.name}")
-                        continue
+            # Convert to list for batch processing
+            file_list: List[Path] = list(all_changed)
 
-                    # Check for duplicate content
-                    content_hash = self._content_hash(content)
-                    if content_hash in self.ingested_hashes:
-                        logger.debug(f"  Skipped duplicate: {file_path.name}")
-                        skipped_count += 1
-                        self.stats["duplicates_skipped"] += 1
-                        continue
+            # Process files in batches to prevent memory buildup
+            for batch_start in range(0, total_files, self.BATCH_SIZE):
+                batch_end = min(batch_start + self.BATCH_SIZE, total_files)
+                batch = file_list[batch_start:batch_end]
+                batch_num = (batch_start // self.BATCH_SIZE) + 1
+                total_batches = (total_files + self.BATCH_SIZE - 1) // self.BATCH_SIZE
 
-                    # Ingest the file
-                    success = await core.ainsert(content, str(file_path))
-                    if success:
-                        self.ingested_hashes.add(content_hash)
-                        ingested_count += 1
-                        self.stats["total_ingested"] += 1
-                        logger.info(f"  ✓ Ingested: {file_path.name}")
-                    else:
+                logger.info(f"Processing batch {batch_num}/{total_batches} ({len(batch)} files)")
+
+                # Process each file in the batch
+                for file_path in batch:
+                    try:
+                        content = file_path.read_text(encoding='utf-8', errors='ignore')
+                        if not content.strip():
+                            logger.debug(f"  Skipped empty file: {file_path.name}")
+                            continue
+
+                        # Check for duplicate content
+                        content_hash = self._content_hash(content)
+                        if content_hash in self.ingested_hashes:
+                            logger.debug(f"  Skipped duplicate: {file_path.name}")
+                            skipped_count += 1
+                            self.stats["duplicates_skipped"] += 1
+                            continue
+
+                        # Ingest the file
+                        success = await core.ainsert(content, str(file_path))
+                        if success:
+                            self.ingested_hashes.add(content_hash)
+                            ingested_count += 1
+                            self.stats["total_ingested"] += 1
+                            logger.info(f"  [OK] Ingested: {file_path.name}")
+                        else:
+                            error_count += 1
+                            self.stats["errors"] += 1
+                            logger.error(f"  [FAIL] Failed: {file_path.name}")
+
+                    except Exception as e:
                         error_count += 1
                         self.stats["errors"] += 1
-                        logger.error(f"  ✗ Failed: {file_path.name}")
+                        self.stats["last_error"] = f"{file_path.name}: {str(e)}"
+                        logger.error(f"  [ERROR] Error ingesting {file_path.name}: {e}")
+                        # Create alert for failed ingestion
+                        self.alert_manager.alert_ingestion_failed(
+                            self.db_name,
+                            file_path.name,
+                            str(e),
+                            {"file_path": str(file_path)}
+                        )
 
-                except Exception as e:
-                    error_count += 1
-                    self.stats["errors"] += 1
-                    self.stats["last_error"] = f"{file_path.name}: {str(e)}"
-                    logger.error(f"  ✗ Error ingesting {file_path.name}: {e}")
-                    # Create alert for failed ingestion
-                    self.alert_manager.alert_ingestion_failed(
-                        self.db_name,
-                        file_path.name,
-                        str(e),
-                        {"file_path": str(file_path)}
-                    )
+                # Force garbage collection after each batch to prevent memory buildup
+                gc.collect()
+                logger.debug(f"Batch {batch_num} complete, gc.collect() called")
 
             # Update last_sync in registry
             self.registry.update_last_sync(self.db_name)
 
             # Log summary
-            logger.info(f"Batch complete: +{ingested_count} ingested, ~{skipped_count} duplicates skipped, ✗{error_count} errors")
+            logger.info(f"All batches complete: +{ingested_count} ingested, ~{skipped_count} duplicates skipped, x{error_count} errors")
             logger.info(f"Session totals: {self.stats['total_ingested']} ingested, {self.stats['duplicates_skipped']} skipped, {self.stats['errors']} errors")
 
             # Create alert if there were errors in the batch
             if error_count > 0:
                 self.alert_manager.alert_ingestion_partial(
                     self.db_name,
-                    total=len(all_changed),
+                    total=total_files,
                     failed=error_count,
-                    {"ingested": ingested_count, "skipped": skipped_count}
+                    details={"ingested": ingested_count, "skipped": skipped_count}
                 )
 
         except Exception as e:
@@ -367,8 +489,10 @@ class WatcherDaemon:
             self.alert_manager.alert_watcher_error(
                 self.db_name,
                 f"Batch ingestion failed: {str(e)}",
-                {"files_attempted": len(all_changed)}
+                {"files_attempted": total_files}
             )
+            # On critical failure, release core to free memory
+            self._release_core()
 
     async def run(self):
         """Run the watcher daemon loop."""
@@ -376,8 +500,10 @@ class WatcherDaemon:
         signal.signal(signal.SIGTERM, self._signal_handler)
         signal.signal(signal.SIGINT, self._signal_handler)
 
-        # Write PID file
-        self._write_pid()
+        # Acquire exclusive lock on PID file (prevents duplicate daemons)
+        if not self._acquire_lock():
+            logger.error("Failed to start - another watcher instance is running")
+            return
 
         self.running = True
         logger.info(f"Watcher started for: {self.db_name}")
@@ -410,7 +536,8 @@ class WatcherDaemon:
                 {"error": str(e), "stats": self.stats}
             )
         finally:
-            self._cleanup_pid()
+            self._release_lock()
+            self._release_core()  # Release core on shutdown to free memory
             logger.info("Watcher stopped")
             # Alert on watcher stop (graceful or not)
             if self.stats["errors"] > 0:

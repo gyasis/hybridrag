@@ -10,8 +10,10 @@ Uses LiteLLM for provider-agnostic model access (Azure, OpenAI, Anthropic, etc.)
 import os
 import asyncio
 import logging
+import random
+from collections import OrderedDict
 from pathlib import Path
-from typing import Dict, List, Optional, Literal, Union, Any
+from typing import Dict, List, Optional, Literal, Union, Any, Set, Type
 from dataclasses import dataclass
 from lightrag import LightRAG, QueryParam
 from lightrag.utils import EmbeddingFunc
@@ -22,6 +24,171 @@ from dotenv import load_dotenv
 load_dotenv()
 
 logger = logging.getLogger(__name__)
+
+# =============================================================================
+# LiteLLM Retry Configuration
+# =============================================================================
+
+# Default timeout for LiteLLM API calls (seconds)
+LITELLM_DEFAULT_TIMEOUT = 60
+
+# Retry configuration
+LITELLM_MAX_RETRIES = 3
+LITELLM_INITIAL_BACKOFF = 1.0  # seconds
+LITELLM_MAX_BACKOFF = 30.0  # seconds
+LITELLM_BACKOFF_MULTIPLIER = 2.0
+LITELLM_JITTER_FACTOR = 0.25  # 25% jitter
+
+# HTTP status codes that are considered transient and should be retried
+TRANSIENT_HTTP_STATUS_CODES: Set[int] = {429, 500, 502, 503, 504}
+
+# Non-retryable HTTP status codes (auth errors, bad requests)
+NON_RETRYABLE_HTTP_STATUS_CODES: Set[int] = {400, 401, 403, 404, 422}
+
+
+def is_transient_error(exception: Exception) -> bool:
+    """
+    Determine if an exception is transient and should be retried.
+
+    Args:
+        exception: The exception to check
+
+    Returns:
+        True if the error is transient and retryable, False otherwise
+    """
+    error_str = str(exception).lower()
+    error_type = type(exception).__name__
+
+    # Check for specific LiteLLM exception types
+    # RateLimitError, ServiceUnavailableError, Timeout, APIConnectionError are retryable
+    transient_exception_patterns = [
+        'ratelimit', 'rate_limit', 'rate limit',
+        'timeout', 'timed out',
+        'connection', 'connectionerror',
+        'serviceunavailable', 'service_unavailable', 'service unavailable',
+        '429', '500', '502', '503', '504',
+        'temporarily unavailable',
+        'too many requests',
+        'server error',
+        'internal server error',
+        'bad gateway',
+        'gateway timeout',
+        'overloaded',
+    ]
+
+    # Non-retryable patterns (auth errors, bad requests)
+    non_retryable_patterns = [
+        'authentication', 'unauthorized', '401',
+        'forbidden', '403',
+        'invalid_api_key', 'invalid api key',
+        'bad request', '400',
+        'not found', '404',
+        'invalid_request', 'invalid request',
+        'malformed',
+        'validation error', '422',
+    ]
+
+    # Check non-retryable patterns first
+    for pattern in non_retryable_patterns:
+        if pattern in error_str or pattern in error_type.lower():
+            return False
+
+    # Check for transient patterns
+    for pattern in transient_exception_patterns:
+        if pattern in error_str or pattern in error_type.lower():
+            return True
+
+    # Default: don't retry unknown errors
+    return False
+
+
+def calculate_backoff_with_jitter(
+    attempt: int,
+    initial_backoff: float = LITELLM_INITIAL_BACKOFF,
+    max_backoff: float = LITELLM_MAX_BACKOFF,
+    multiplier: float = LITELLM_BACKOFF_MULTIPLIER,
+    jitter_factor: float = LITELLM_JITTER_FACTOR
+) -> float:
+    """
+    Calculate exponential backoff with jitter.
+
+    Args:
+        attempt: Current retry attempt (0-indexed)
+        initial_backoff: Initial backoff in seconds
+        max_backoff: Maximum backoff in seconds
+        multiplier: Backoff multiplier
+        jitter_factor: Random jitter factor (0.0 to 1.0)
+
+    Returns:
+        Backoff duration in seconds
+    """
+    # Exponential backoff
+    backoff = initial_backoff * (multiplier ** attempt)
+
+    # Cap at max backoff
+    backoff = min(backoff, max_backoff)
+
+    # Add jitter: backoff * (1 +/- jitter_factor * random)
+    jitter = backoff * jitter_factor * (2 * random.random() - 1)
+    backoff = max(0.1, backoff + jitter)  # Ensure minimum 100ms
+
+    return backoff
+
+
+async def retry_with_backoff(
+    func,
+    *args,
+    max_retries: int = LITELLM_MAX_RETRIES,
+    operation_name: str = "LiteLLM call",
+    **kwargs
+):
+    """
+    Execute an async function with exponential backoff retry for transient errors.
+
+    Args:
+        func: Async function to execute
+        *args: Positional arguments for func
+        max_retries: Maximum number of retry attempts
+        operation_name: Name for logging
+        **kwargs: Keyword arguments for func
+
+    Returns:
+        Result from successful function call
+
+    Raises:
+        Exception: If all retries fail or error is non-retryable
+    """
+    last_exception = None
+
+    for attempt in range(max_retries + 1):
+        try:
+            return await func(*args, **kwargs)
+        except Exception as e:
+            last_exception = e
+
+            # Check if error is retryable
+            if not is_transient_error(e):
+                logger.error(f"{operation_name} failed with non-retryable error: {e}")
+                raise
+
+            # Check if we have retries left
+            if attempt >= max_retries:
+                logger.error(
+                    f"{operation_name} failed after {max_retries + 1} attempts. "
+                    f"Last error: {e}"
+                )
+                raise
+
+            # Calculate backoff and wait
+            backoff = calculate_backoff_with_jitter(attempt)
+            logger.warning(
+                f"{operation_name} transient error (attempt {attempt + 1}/{max_retries + 1}): {e}. "
+                f"Retrying in {backoff:.2f}s..."
+            )
+            await asyncio.sleep(backoff)
+
+    # Should not reach here, but raise last exception if we do
+    raise last_exception
 
 # Type definitions
 QueryMode = Literal["local", "global", "hybrid", "naive", "mix"]
@@ -37,26 +204,77 @@ class QueryResult:
     execution_time: float
     error: Optional[str] = None
 
+class LRUCache:
+    """
+    Simple LRU (Least Recently Used) cache with max size limit.
+
+    Uses OrderedDict to maintain insertion order and evict oldest items
+    when capacity is exceeded.
+    """
+
+    def __init__(self, max_size: int = 1000):
+        """
+        Initialize LRU cache.
+
+        Args:
+            max_size: Maximum number of items to store (default 1000)
+        """
+        self._cache: OrderedDict[str, str] = OrderedDict()
+        self._max_size = max_size
+
+    def get(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        """Get item from cache, moving it to end (most recently used)."""
+        if key in self._cache:
+            self._cache.move_to_end(key)
+            return self._cache[key]
+        return default
+
+    def set(self, key: str, value: str) -> None:
+        """Set item in cache, evicting oldest if at capacity."""
+        if key in self._cache:
+            self._cache.move_to_end(key)
+        else:
+            if len(self._cache) >= self._max_size:
+                # Evict oldest item (first item in OrderedDict)
+                self._cache.popitem(last=False)
+        self._cache[key] = value
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._cache
+
+    def __len__(self) -> int:
+        return len(self._cache)
+
+    def clear(self) -> None:
+        """Clear all items from cache."""
+        self._cache.clear()
+
+
 class HybridLightRAGCore:
     """
     Core LightRAG interface for hybrid RAG system.
     Implements validated QueryParam patterns.
     """
-    
-    def __init__(self, config):
+
+    # Default max cache size for context cache
+    DEFAULT_CACHE_MAX_SIZE = 1000
+
+    def __init__(self, config, cache_max_size: int = DEFAULT_CACHE_MAX_SIZE):
         """
         Initialize Hybrid LightRAG Core.
-        
+
         Args:
             config: HybridRAGConfig instance
+            cache_max_size: Maximum size for context cache (default 1000)
         """
         self.config = config.lightrag
         self._setup_api_key()
         self._ensure_working_dir()
         self._init_lightrag()
         self.rag_initialized = False
-        self.context_cache: Dict[str, str] = {}
-        
+        # Use LRU cache with bounded size to prevent memory leaks
+        self.context_cache = LRUCache(max_size=cache_max_size)
+
         logger.info(f"HybridLightRAGCore initialized with working dir: {self.config.working_dir}")
     
     def _setup_api_key(self):
@@ -120,7 +338,14 @@ class HybridLightRAGCore:
             history_messages: Optional[List[Dict[str, str]]] = None,
             **kwargs
         ) -> str:
-            """LiteLLM-based completion function for Azure/OpenAI/Anthropic/etc."""
+            """
+            LiteLLM-based completion function for Azure/OpenAI/Anthropic/etc.
+
+            Features:
+                - Explicit timeout to prevent indefinite hangs
+                - Exponential backoff with jitter for transient errors
+                - Smart retry logic (only retries 429, 5xx; not 401, 400)
+            """
             messages = []
 
             # Add system prompt if provided
@@ -141,48 +366,68 @@ class HybridLightRAGCore:
                 if k in LITELLM_ALLOWED_KWARGS and v is not None
             }
 
-            try:
-                # Build LiteLLM call kwargs
-                litellm_kwargs = {
-                    "model": self.config.model_name,
-                    "messages": messages,
-                    "api_key": self.api_key,
-                    **filtered_kwargs
-                }
+            # Build LiteLLM call kwargs
+            litellm_kwargs = {
+                "model": self.config.model_name,
+                "messages": messages,
+                "api_key": self.api_key,
+                # Set explicit timeout to prevent indefinite hangs
+                "timeout": filtered_kwargs.pop("timeout", LITELLM_DEFAULT_TIMEOUT),
+                **filtered_kwargs
+            }
 
-                # Add Azure-specific parameters if using Azure
-                if self.is_azure and self.azure_api_base:
-                    litellm_kwargs["api_base"] = self.azure_api_base
-                    litellm_kwargs["api_version"] = self.azure_api_version
+            # Add Azure-specific parameters if using Azure
+            if self.is_azure and self.azure_api_base:
+                litellm_kwargs["api_base"] = self.azure_api_base
+                litellm_kwargs["api_version"] = self.azure_api_version
 
-                # Use LiteLLM for provider-agnostic completion
+            # Inner function for retry wrapper
+            async def _do_completion():
                 response = await litellm.acompletion(**litellm_kwargs)
                 return response.choices[0].message.content
-            except Exception as e:
-                logger.error(f"LiteLLM completion error: {e}")
-                raise
+
+            # Execute with retry logic for transient errors
+            return await retry_with_backoff(
+                _do_completion,
+                max_retries=LITELLM_MAX_RETRIES,
+                operation_name="LiteLLM completion"
+            )
 
         # Embedding function using LiteLLM for provider-agnostic embeddings
         async def embedding_func(texts: List[str]) -> List[List[float]]:
-            """LiteLLM-based embedding function for Azure/OpenAI/etc."""
-            try:
-                # Build LiteLLM embedding call kwargs
-                litellm_kwargs = {
-                    "model": self.config.embedding_model,
-                    "input": texts,
-                    "api_key": self.api_key
-                }
+            """
+            LiteLLM-based embedding function for Azure/OpenAI/etc.
 
-                # Add Azure-specific parameters if embedding model uses Azure
-                if self.config.embedding_model.startswith("azure/") and self.azure_api_base:
-                    litellm_kwargs["api_base"] = self.azure_api_base
-                    litellm_kwargs["api_version"] = self.azure_api_version
+            Features:
+                - Explicit timeout to prevent indefinite hangs
+                - Exponential backoff with jitter for transient errors
+                - Smart retry logic (only retries 429, 5xx; not 401, 400)
+            """
+            # Build LiteLLM embedding call kwargs
+            litellm_kwargs = {
+                "model": self.config.embedding_model,
+                "input": texts,
+                "api_key": self.api_key,
+                # Set explicit timeout to prevent indefinite hangs
+                "timeout": LITELLM_DEFAULT_TIMEOUT
+            }
 
+            # Add Azure-specific parameters if embedding model uses Azure
+            if self.config.embedding_model.startswith("azure/") and self.azure_api_base:
+                litellm_kwargs["api_base"] = self.azure_api_base
+                litellm_kwargs["api_version"] = self.azure_api_version
+
+            # Inner function for retry wrapper
+            async def _do_embedding():
                 response = await litellm.aembedding(**litellm_kwargs)
                 return [item["embedding"] for item in response.data]
-            except Exception as e:
-                logger.error(f"LiteLLM embedding error: {e}")
-                raise
+
+            # Execute with retry logic for transient errors
+            return await retry_with_backoff(
+                _do_embedding,
+                max_retries=LITELLM_MAX_RETRIES,
+                operation_name="LiteLLM embedding"
+            )
 
         # Initialize LightRAG with LiteLLM functions
         self.rag = LightRAG(

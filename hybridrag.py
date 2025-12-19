@@ -152,6 +152,8 @@ class HybridRAGCLI:
             await self.run_db_command()
         elif command == 'monitor':
             self.run_monitor()
+        elif command == 'snapshot':
+            await self.show_snapshot()
         else:
             print(f"❌ Unknown command: {command}")
             return 1
@@ -929,6 +931,85 @@ class HybridRAGCLI:
 
         print("="*70)
 
+    async def show_snapshot(self):
+        """Quick status snapshot for monitoring: watchers, folders, files processed."""
+        from src.utils import format_file_size
+        from datetime import datetime
+
+        print("\n" + "="*60)
+        print("  HYBRIDRAG SNAPSHOT  " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        print("="*60)
+
+        # Get all registered databases
+        try:
+            registry = get_registry()
+            databases = registry.list_all()
+        except Exception:
+            databases = []
+
+        if not databases:
+            # Fall back to working dir only
+            db_path = Path(self.working_dir)
+            if db_path.exists():
+                json_files = list(db_path.glob("*.json"))
+                total_size = sum(f.stat().st_size for f in db_path.glob("*") if f.is_file())
+                print(f"\n  DB: {db_path.name}")
+                print(f"      Size: {format_file_size(total_size)} | Files: {len(json_files)} JSON")
+            else:
+                print(f"\n  No database at: {self.working_dir}")
+            print("\n" + "="*60)
+            return
+
+        # Summary counters
+        total_watchers = 0
+        running_watchers = 0
+        total_files_processed = 0
+        total_db_size = 0
+        all_source_folders = []
+
+        for entry in databases:
+            total_watchers += 1
+            running, pid = is_watcher_running(entry.name)
+            if running:
+                running_watchers += 1
+
+            # Get database stats
+            db_path = Path(entry.path)
+            if db_path.exists():
+                db_files = list(db_path.glob("*.json"))
+                db_size = sum(f.stat().st_size for f in db_path.glob("*") if f.is_file())
+                total_db_size += db_size
+
+            # Get metadata for file count
+            try:
+                meta = DatabaseMetadata(entry.path)
+                files_ingested = meta.metadata.get("total_files_ingested", 0)
+                total_files_processed += files_ingested
+                # Get source folders from metadata
+                for folder in meta.metadata.get("source_folders", []):
+                    all_source_folders.append(folder.get("path", ""))
+            except Exception:
+                files_ingested = 0
+
+            # Display per-database info
+            watcher_icon = "🟢" if running else "⚪"
+            watcher_text = f"PID {pid}" if running else "stopped"
+            print(f"\n  [{entry.name}]")
+            print(f"      Watcher: {watcher_icon} {watcher_text}")
+            if entry.source_folder:
+                print(f"      Source:  {entry.source_folder}")
+            print(f"      Files:   {files_ingested} processed")
+            print(f"      DB Size: {format_file_size(db_size) if db_path.exists() else 'N/A'}")
+
+        # Summary
+        print("\n" + "-"*60)
+        print(f"  SUMMARY")
+        print(f"      Watchers: {running_watchers}/{total_watchers} running")
+        print(f"      Folders:  {len(all_source_folders)} source folders tracked")
+        print(f"      Files:    {total_files_processed} total processed")
+        print(f"      Storage:  {format_file_size(total_db_size)}")
+        print("="*60 + "\n")
+
     # ========================================
     # Database Registry Commands
     # ========================================
@@ -1249,10 +1330,18 @@ class HybridRAGCLI:
         original_folder = getattr(self.args, 'folder', None)
         original_db_action = getattr(self.args, 'db_action', None)
         original_recursive = getattr(self.args, 'recursive', True)
+        original_multiprocess = getattr(self.args, 'multiprocess', False)
+        original_yes = getattr(self.args, 'yes', False)
+        original_quiet = getattr(self.args, 'quiet', False)
+        original_metadata = getattr(self.args, 'metadata', None)
 
         self.args.folder = entry.source_folder
         self.args.db_action = db_action
         self.args.recursive = entry.recursive
+        self.args.multiprocess = False  # Use single process for sync
+        self.args.yes = True  # Auto-confirm for sync
+        self.args.quiet = False  # Show progress
+        self.args.metadata = None  # No extra metadata for sync
 
         try:
             await self.run_ingest()
@@ -1267,6 +1356,10 @@ class HybridRAGCLI:
             self.args.folder = original_folder
             self.args.db_action = original_db_action
             self.args.recursive = original_recursive
+            self.args.multiprocess = original_multiprocess
+            self.args.yes = original_yes
+            self.args.quiet = original_quiet
+            self.args.metadata = original_metadata
 
     async def run_db_watch(self):
         """Handle watch subcommands."""
@@ -1594,6 +1687,9 @@ Examples:
 
     # Db-info command
     dbinfo_parser = subparsers.add_parser('db-info', help='Show detailed database information with source folders')
+
+    # Snapshot command - quick status overview
+    snapshot_parser = subparsers.add_parser('snapshot', help='Quick status snapshot: watchers, folders, files processed')
 
     # Monitor command (TUI dashboard)
     monitor_parser = subparsers.add_parser('monitor', help='Launch interactive TUI dashboard')
