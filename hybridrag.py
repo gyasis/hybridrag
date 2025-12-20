@@ -46,11 +46,11 @@ from src.database_metadata import DatabaseMetadata, list_all_databases
 
 # Import database registry
 from src.database_registry import (
-    DatabaseRegistry, DatabaseEntry, SourceType,
-    get_registry, resolve_database, get_config_for_script,
-    register_specstory_database, register_schema_database,
-    get_watcher_pid_file, is_watcher_running
+    DatabaseEntry, get_registry, resolve_database, get_watcher_pid_file, is_watcher_running
 )
+
+# Import backend configuration for status command
+from src.config.config import BackendConfig
 
 # Configure logging
 logging.basicConfig(
@@ -87,7 +87,7 @@ def get_api_key_for_model(model_name: str) -> Optional[str]:
         # Ollama doesn't need an API key for local models
         return "ollama-local"
 
-    elif model_lower.startswith('openai/') or not '/' in model_lower:
+    elif model_lower.startswith('openai/') or '/' not in model_lower:
         # OpenAI or bare model name defaults to OpenAI
         return os.getenv("OPENAI_API_KEY")
 
@@ -144,16 +144,16 @@ class HybridRAGCLI:
             await self.show_status()
         elif command == 'check-db':
             await self.check_database()
-        elif command == 'list-dbs':
-            await self.list_databases()
-        elif command == 'db-info':
-            await self.show_database_info()
+        # Note: 'list-dbs' removed - use 'db list' instead
+        # Note: 'db-info' removed - use 'db show <name>' instead
         elif command == 'db':
             await self.run_db_command()
         elif command == 'monitor':
             self.run_monitor()
         elif command == 'snapshot':
             await self.show_snapshot()
+        elif command == 'backend':
+            await self.run_backend_command()
         else:
             print(f"❌ Unknown command: {command}")
             return 1
@@ -325,7 +325,7 @@ class HybridRAGCLI:
 
                     # Display results
                     if result.get('success'):
-                        print(f"\n💡 Response:")
+                        print("\n💡 Response:")
                         print("-" * 70)
                         print(result.get('result', 'No result'))
                         print("-" * 70)
@@ -587,7 +587,7 @@ class HybridRAGCLI:
                     key, value = item.split('=', 1)
                     extra_metadata[key] = value
 
-        print(f"\n🚀 Starting ingestion:")
+        print("\n🚀 Starting ingestion:")
         print(f"   Folders: {', '.join(folders)}")
         print(f"   Recursive: {recursive}")
         print(f"   Database: {self.working_dir}")
@@ -732,13 +732,13 @@ class HybridRAGCLI:
             )
 
         # Step 4: Print summary
-        print(f"\n✅ Ingestion complete:")
+        print("\n✅ Ingestion complete:")
         print(f"   Files found:     {results['files_found']}")
         print(f"   Files processed: {results['files_processed']}")
         print(f"   Files failed:    {results['files_failed']}")
 
         if results["errors"]:
-            print(f"\n⚠️  Errors:")
+            print("\n⚠️  Errors:")
             for error in results["errors"][:10]:  # Show first 10 errors
                 print(f"   - {error}")
             if len(results["errors"]) > 10:
@@ -792,13 +792,13 @@ class HybridRAGCLI:
 
             if db['has_metadata']:
                 stats = db['stats']
-                print(f"   ✅ Has metadata")
+                print("   ✅ Has metadata")
                 print(f"   Files ingested: {stats.get('total_files_ingested', 'Unknown')}")
                 print(f"   Source folders: {stats.get('source_folders_count', 0)}")
                 if stats.get('description'):
                     print(f"   Description: {stats.get('description')}")
             else:
-                print(f"   ⚠️  No metadata (old database)")
+                print("   ⚠️  No metadata (old database)")
                 print(f"   Run: python hybridrag.py --working-dir {db['path']} db-info")
 
         print("\n" + "="*70)
@@ -808,7 +808,7 @@ class HybridRAGCLI:
         """Show detailed information about current database."""
         db_path = Path(self.working_dir)
 
-        print(f"\n🔍 Database Information")
+        print("\n🔍 Database Information")
         print("="*70)
         print(f"Location: {db_path.resolve()}")
 
@@ -828,7 +828,7 @@ class HybridRAGCLI:
         # Get stats
         stats = metadata.get_stats()
 
-        print(f"\n📈 Statistics:")
+        print("\n📈 Statistics:")
         print(f"   Created: {stats.get('created_at', 'Unknown')}")
         print(f"   Last updated: {stats.get('last_updated', 'Unknown')}")
         print(f"   Total files ingested: {stats.get('total_files_ingested', 0)}")
@@ -852,7 +852,7 @@ class HybridRAGCLI:
         # Show recent ingestion history
         history = metadata.get_ingestion_history(limit=5)
         if history:
-            print(f"\n📜 Recent Ingestion History:")
+            print("\n📜 Recent Ingestion History:")
             for i, event in enumerate(reversed(history), 1):
                 status = "✅" if event.get('success') else "❌"
                 print(f"   {i}. {status} {event.get('timestamp', 'Unknown')}")
@@ -917,7 +917,7 @@ class HybridRAGCLI:
         from src.utils import format_file_size
         total_size = sum(f.stat().st_size for f in other_files if f.is_file())
 
-        print(f"\n✅ Database exists")
+        print("\n✅ Database exists")
         print(f"   JSON files: {len(json_files)}")
         print(f"   Total files: {len(other_files)}")
         print(f"   Total size: {format_file_size(total_size)}")
@@ -1003,7 +1003,7 @@ class HybridRAGCLI:
 
         # Summary
         print("\n" + "-"*60)
-        print(f"  SUMMARY")
+        print("  SUMMARY")
         print(f"      Watchers: {running_watchers}/{total_watchers} running")
         print(f"      Folders:  {len(all_source_folders)} source folders tracked")
         print(f"      Files:    {total_files_processed} total processed")
@@ -1091,6 +1091,62 @@ class HybridRAGCLI:
                 'jira_project_key': jira_project
             }
 
+        # Handle backend configuration (T016)
+        backend = getattr(self.args, 'backend', 'json')
+        connection_string = getattr(self.args, 'connection_string', None)
+
+        if backend == 'postgres':
+            # Build backend config for PostgreSQL
+            backend_config_dict = {
+                'backend_type': 'postgres',
+            }
+
+            if connection_string:
+                # Parse connection string
+                try:
+                    parsed_config = BackendConfig.from_connection_string(connection_string)
+                    backend_config_dict.update({
+                        'postgres_host': parsed_config.postgres_host,
+                        'postgres_port': parsed_config.postgres_port,
+                        'postgres_user': parsed_config.postgres_user,
+                        'postgres_password': parsed_config.postgres_password,
+                        'postgres_database': parsed_config.postgres_database,
+                        'connection_string': connection_string,
+                    })
+                except Exception as e:
+                    print(f"❌ Invalid connection string: {e}")
+                    return
+            else:
+                # Use individual parameters
+                password = getattr(self.args, 'postgres_password', None) or os.environ.get('POSTGRES_PASSWORD')
+                backend_config_dict.update({
+                    'postgres_host': getattr(self.args, 'postgres_host', 'localhost'),
+                    'postgres_port': getattr(self.args, 'postgres_port', 5432),
+                    'postgres_user': getattr(self.args, 'postgres_user', 'hybridrag'),
+                    'postgres_password': password,
+                    'postgres_database': getattr(self.args, 'postgres_database', 'hybridrag'),
+                })
+
+            # Validate PostgreSQL connection before registering (T017)
+            print("🔌 Validating PostgreSQL connection...")
+            is_valid, error_msg = await self._validate_postgres_connection(backend_config_dict)
+            if not is_valid:
+                print(f"❌ PostgreSQL connection failed: {error_msg}")
+                print("\nTroubleshooting:")
+                print("  1. Ensure PostgreSQL is running")
+                print("  2. Check connection parameters")
+                print("  3. Verify user has database access")
+                print("\nOr auto-provision with: python hybridrag.py backend setup-docker")
+                return
+
+            print("✅ PostgreSQL connection validated")
+            kwargs['backend_type'] = 'postgres'
+            kwargs['backend_config'] = backend_config_dict
+        else:
+            # Default JSON backend
+            kwargs['backend_type'] = 'json'
+            kwargs['backend_config'] = {'backend_type': 'json'}
+
         try:
             entry = registry.register(
                 name=name,
@@ -1103,6 +1159,7 @@ class HybridRAGCLI:
             if entry.source_folder:
                 print(f"   Source: {entry.source_folder}")
             print(f"   Type: {entry.source_type}")
+            print(f"   Backend: {kwargs.get('backend_type', 'json')}")
             print(f"   Auto-watch: {entry.auto_watch}")
             if entry.model:
                 print(f"   Model: {entry.model}")
@@ -1111,6 +1168,62 @@ class HybridRAGCLI:
             print(f"❌ Registration failed: {e}")
         except Exception as e:
             print(f"❌ Unexpected error: {e}")
+
+    async def _validate_postgres_connection(self, config_dict: dict) -> tuple:
+        """
+        Validate PostgreSQL connection before registering database (T017).
+
+        Args:
+            config_dict: Backend configuration dictionary with postgres_* fields
+
+        Returns:
+            Tuple of (is_valid: bool, error_message: str or None)
+        """
+        try:
+            import asyncpg
+        except ImportError:
+            return False, "asyncpg package not installed. Install with: pip install asyncpg"
+
+        # Build connection string
+        host = config_dict.get('postgres_host', 'localhost')
+        port = config_dict.get('postgres_port', 5432)
+        user = config_dict.get('postgres_user', 'hybridrag')
+        password = config_dict.get('postgres_password', '')
+        database = config_dict.get('postgres_database', 'hybridrag')
+
+        if config_dict.get('connection_string'):
+            conn_str = config_dict['connection_string']
+        else:
+            password_part = f":{password}" if password else ""
+            conn_str = f"postgresql://{user}{password_part}@{host}:{port}/{database}"
+
+        try:
+            # Attempt to connect with timeout
+            conn = await asyncio.wait_for(
+                asyncpg.connect(conn_str),
+                timeout=10.0
+            )
+            try:
+                # Verify pgvector extension is available
+                result = await conn.fetchval(
+                    "SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'vector')"
+                )
+                if not result:
+                    return False, "pgvector extension not installed. Run: CREATE EXTENSION vector;"
+                return True, None
+            finally:
+                await conn.close()
+
+        except asyncio.TimeoutError:
+            return False, f"Connection timed out (10s) - host {host}:{port} not reachable"
+        except asyncpg.InvalidCatalogNameError:
+            return False, f"Database '{database}' does not exist"
+        except asyncpg.InvalidAuthorizationSpecificationError:
+            return False, f"Authentication failed for user '{user}'"
+        except asyncpg.PostgresConnectionError as e:
+            return False, f"Connection refused - {str(e)}"
+        except Exception as e:
+            return False, f"Connection error: {str(e)}"
 
     async def run_db_list(self):
         """List all registered databases."""
@@ -1175,9 +1288,21 @@ class HybridRAGCLI:
                 print(f"   - {db.name}")
             return
 
+        show_stats = getattr(self.args, 'stats', False)
+
         if getattr(self.args, 'json', False):
             import json
-            print(json.dumps(entry.to_dict(), indent=2, default=str))
+            data = entry.to_dict()
+            if show_stats:
+                # Include knowledge graph stats in JSON output
+                metrics = await self._collect_backend_metrics(entry, verbose=False)
+                data['knowledge_graph'] = {
+                    'entities': metrics.get('entity_count', 0),
+                    'relations': metrics.get('relation_count', 0),
+                    'chunks': metrics.get('chunk_count', 0),
+                    'documents': metrics.get('doc_count', 0)
+                }
+            print(json.dumps(data, indent=2, default=str))
             return
 
         # Check watcher status
@@ -1200,11 +1325,77 @@ class HybridRAGCLI:
         if running:
             print(f"\n🟢 Watcher running (PID: {pid})")
         else:
-            print(f"\n⚪ Watcher stopped")
+            print("\n⚪ Watcher stopped")
+
+        # Knowledge graph stats (when --stats flag is provided)
+        if show_stats:
+            print("\n📈 Knowledge Graph Stats:")
+            try:
+                metrics = await self._collect_backend_metrics(entry, verbose=False)
+                print(f"   Entities:     {metrics.get('entity_count', 0):,}")
+                print(f"   Relations:    {metrics.get('relation_count', 0):,}")
+                print(f"   Chunks:       {metrics.get('chunk_count', 0):,}")
+                print(f"   Documents:    {metrics.get('doc_count', 0):,}")
+                if metrics.get('warnings'):
+                    for warning in metrics['warnings']:
+                        print(f"   ⚠️  {warning}")
+            except Exception as e:
+                print(f"   ⚠️  Could not collect stats: {e}")
+
+            # Show doc status details from kv_store_doc_status.json
+            try:
+                doc_status_path = Path(entry.path) / "kv_store_doc_status.json"
+                if doc_status_path.exists():
+                    import json
+                    with open(doc_status_path, 'r') as f:
+                        doc_status = json.load(f)
+
+                    # Collect all file info
+                    files_info = []
+                    processing_files = []
+                    total_content_size = 0
+
+                    for doc_id, doc_data in doc_status.items():
+                        if isinstance(doc_data, dict):
+                            total_content_size += doc_data.get('content_length', 0)
+                            if doc_data.get('file_path'):
+                                info = {
+                                    'path': doc_data.get('file_path', 'Unknown'),
+                                    'updated': doc_data.get('updated_at', doc_data.get('created_at', '')),
+                                    'chunks': doc_data.get('chunks_count', 0),
+                                    'size': doc_data.get('content_length', 0),
+                                    'status': doc_data.get('status', 'unknown')
+                                }
+                                if info['status'] == 'processing':
+                                    processing_files.append(info)
+                                else:
+                                    files_info.append(info)
+
+                    # Show content size
+                    print(f"   Content:      {total_content_size / 1024 / 1024:.1f} MB")
+
+                    # Show files currently processing
+                    if processing_files:
+                        print(f"\n⏳ Processing ({len(processing_files)} files):")
+                        for item in processing_files[:3]:  # Show max 3
+                            filename = Path(item.get('path', 'Unknown')).name
+                            print(f"   → {filename}")
+
+                    # Show recent processed files
+                    if files_info:
+                        print("\n📂 Recent Files (last 5):")
+                        recent = sorted(files_info, key=lambda x: x.get('updated', ''), reverse=True)[:5]
+                        for item in recent:
+                            ts = item.get('updated', 'Unknown')[:19].replace('T', ' ')
+                            filename = Path(item.get('path', 'Unknown')).name
+                            chunks = item.get('chunks', 0)
+                            print(f"   ✓ {ts}  {filename} ({chunks} chunks)")
+            except Exception as e:
+                pass  # Silently skip if can't read
 
         # Type-specific config
         if entry.specstory_config:
-            print(f"\n   SpecStory Config:")
+            print("\n   SpecStory Config:")
             for key, val in entry.specstory_config.items():
                 print(f"      {key}: {val}")
 
@@ -1278,8 +1469,8 @@ class HybridRAGCLI:
         if not getattr(self.args, 'yes', False):
             print(f"\n⚠️  About to unregister: {name}")
             print(f"   Path: {entry.path}")
-            print(f"\n   This removes the database from the registry.")
-            print(f"   The database files will NOT be deleted.")
+            print("\n   This removes the database from the registry.")
+            print("   The database files will NOT be deleted.")
             response = input("\nProceed? [y/N]: ").strip().lower()
             if response != 'y':
                 print("Cancelled.")
@@ -1406,8 +1597,11 @@ class HybridRAGCLI:
                 await self._start_watcher_for_db(entry, use_systemd)
         else:
             name = getattr(self.args, 'name', None)
+            # Fall back to --db flag if no positional argument provided
+            if not name and self._db_entry:
+                name = self._db_entry.name
             if not name:
-                print("❌ Database name required (or use --all)")
+                print("❌ Database name required (use --db NAME or provide name argument)")
                 return
 
             entry = registry.get(name)
@@ -1419,7 +1613,6 @@ class HybridRAGCLI:
 
     async def _start_watcher_for_db(self, entry: DatabaseEntry, use_systemd: bool = False):
         """Start watcher for a specific database entry."""
-        from src.database_registry import get_watcher_pid_file
 
         # Check if already running
         running, pid = is_watcher_running(entry.name)
@@ -1466,8 +1659,8 @@ class HybridRAGCLI:
                 print(f"✅ Started watcher for {entry.name} (legacy mode)")
                 return
 
-            print(f"⚠️  Watcher script not found. Please create scripts/hybridrag-watcher.py")
-            print(f"   or use: python hybridrag.py db watch start-all --systemd")
+            print("⚠️  Watcher script not found. Please create scripts/hybridrag-watcher.py")
+            print("   or use: python hybridrag.py db watch start-all --systemd")
             return
 
         # Run the Python watcher script
@@ -1484,9 +1677,9 @@ class HybridRAGCLI:
             start_new_session=True
         )
 
-        # Write PID file
-        pid_file.parent.mkdir(parents=True, exist_ok=True)
-        pid_file.write_text(str(proc.pid))
+        # Note: DO NOT write PID file here - the watcher script handles
+        # its own PID file creation with proper flock locking to prevent
+        # race conditions. See BUG-003 fix.
 
         print(f"✅ Started watcher for {entry.name} (PID: {proc.pid})")
 
@@ -1498,7 +1691,6 @@ class HybridRAGCLI:
             print(f"❌ Failed to load registry: {e}")
             return
 
-        from src.database_registry import get_watcher_pid_file
         import signal
 
         stop_all = getattr(self.args, 'all', False)
@@ -1525,8 +1717,11 @@ class HybridRAGCLI:
             print(f"\nStopped {stopped} watcher(s)")
         else:
             name = getattr(self.args, 'name', None)
+            # Fall back to --db flag if no positional argument provided
+            if not name and self._db_entry:
+                name = self._db_entry.name
             if not name:
-                print("❌ Database name required (or use --all)")
+                print("❌ Database name required (use --db NAME or provide name argument)")
                 return
 
             running, pid = is_watcher_running(name)
@@ -1557,6 +1752,9 @@ class HybridRAGCLI:
             return
 
         name = getattr(self.args, 'name', None)
+        # Fall back to --db flag if no positional argument provided
+        if not name and self._db_entry:
+            name = self._db_entry.name
 
         if name:
             # Show status for specific database
@@ -1571,7 +1769,7 @@ class HybridRAGCLI:
             if running:
                 print(f"   Status: 🟢 Running (PID: {pid})")
             else:
-                print(f"   Status: ⚪ Stopped")
+                print("   Status: ⚪ Stopped")
             print(f"   Auto-watch: {entry.auto_watch}")
             print(f"   Interval: {entry.watch_interval}s")
             print(f"   Source: {entry.source_folder or 'Not set'}")
@@ -1601,6 +1799,868 @@ class HybridRAGCLI:
             print("="*60)
             print(f"Running: {running_count}/{len(databases)}")
             print("\n   [✓] = auto-watch enabled")
+
+    # ========================================
+    # Backend Management Commands
+    # ========================================
+
+    async def run_backend_command(self):
+        """Route backend management subcommands."""
+        backend_cmd = getattr(self.args, 'backend_command', None)
+
+        if not backend_cmd:
+            print("❌ No backend subcommand specified")
+            print("\nUsage: python hybridrag.py backend <command>")
+            print("\nCommands:")
+            print("  status       - Show backend status and metrics")
+            print("  setup-docker - Auto-provision PostgreSQL with pgvector via Docker")
+            print("  migrate      - Migrate database from JSON to PostgreSQL")
+            return
+
+        if backend_cmd == 'status':
+            await self.show_backend_status()
+        elif backend_cmd == 'setup-docker':
+            await self.setup_docker()
+        elif backend_cmd == 'migrate':
+            await self.run_migrate()
+        else:
+            print(f"❌ Unknown backend command: {backend_cmd}")
+
+    async def setup_docker(self):
+        """
+        Auto-provision PostgreSQL with pgvector via Docker (T018-T019).
+
+        Implements idempotent container management:
+        - Detects if container is already running
+        - Reuses existing container if healthy
+        - Creates new container if needed
+        - Provides helpful errors if Docker is unavailable
+        """
+        import shutil
+        import subprocess
+
+        port = getattr(self.args, 'port', 5432)
+        password = getattr(self.args, 'password', 'hybridrag_default')
+        data_dir = getattr(self.args, 'data_dir', None)
+        force = getattr(self.args, 'force', False)
+
+        # Check if Docker is available
+        docker_path = shutil.which('docker')
+        if not docker_path:
+            print("❌ Docker not found in PATH")
+            print("\nTo use auto-provisioning, install Docker:")
+            print("  - Desktop: https://www.docker.com/products/docker-desktop")
+            print("  - Linux: https://docs.docker.com/engine/install/")
+            print("\nAlternatively, connect to existing PostgreSQL:")
+            print("  python hybridrag.py db register mydb --backend postgres \\")
+            print("    --connection-string postgresql://user:pass@host:5432/db --path ./db")
+            return
+
+        # Check if Docker daemon is running
+        try:
+            result = subprocess.run(
+                ['docker', 'info'],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if result.returncode != 0:
+                print("❌ Docker daemon is not running")
+                print("\nStart Docker and try again")
+                return
+        except subprocess.TimeoutExpired:
+            print("❌ Docker daemon not responding")
+            return
+        except Exception as e:
+            print(f"❌ Error checking Docker: {e}")
+            return
+
+        container_name = 'hybridrag-postgres'
+
+        # Check if container already exists (T019 - idempotent management)
+        try:
+            result = subprocess.run(
+                ['docker', 'inspect', container_name],
+                capture_output=True,
+                text=True
+            )
+            container_exists = result.returncode == 0
+
+            if container_exists and not force:
+                # Check if it's running
+                result = subprocess.run(
+                    ['docker', 'inspect', '-f', '{{.State.Running}}', container_name],
+                    capture_output=True,
+                    text=True
+                )
+                is_running = result.stdout.strip() == 'true'
+
+                if is_running:
+                    # Check if it's healthy
+                    result = subprocess.run(
+                        ['docker', 'inspect', '-f', '{{.State.Health.Status}}', container_name],
+                        capture_output=True,
+                        text=True
+                    )
+                    health = result.stdout.strip()
+
+                    if health == 'healthy':
+                        print(f"✅ Container '{container_name}' is already running and healthy")
+                        self._print_docker_connection_info(port, password)
+                        return
+                    else:
+                        print(f"⚠️  Container exists but health status: {health}")
+                        print("   Waiting for container to become healthy...")
+                else:
+                    print("⚠️  Container exists but is not running. Starting...")
+                    subprocess.run(['docker', 'start', container_name], check=True)
+
+        except Exception as e:
+            print(f"⚠️  Error checking container status: {e}")
+            container_exists = False
+
+        # If container doesn't exist or force is set, use docker-compose
+        if not container_exists or force:
+            print("🐳 Provisioning PostgreSQL with pgvector...")
+
+            # Find docker-compose file
+            script_dir = Path(__file__).parent
+            compose_file = script_dir / 'docker' / 'docker-compose.postgres.yaml'
+
+            if not compose_file.exists():
+                print(f"❌ Docker compose file not found: {compose_file}")
+                return
+
+            # Build environment
+            env = os.environ.copy()
+            env['POSTGRES_PASSWORD'] = password
+            env['POSTGRES_PORT'] = str(port)
+            if data_dir:
+                env['POSTGRES_DATA_DIR'] = data_dir
+
+            # Run docker-compose
+            compose_cmd = ['docker', 'compose', '-f', str(compose_file)]
+            if force:
+                compose_cmd.extend(['up', '-d', '--force-recreate'])
+            else:
+                compose_cmd.extend(['up', '-d'])
+
+            try:
+                result = subprocess.run(
+                    compose_cmd,
+                    env=env,
+                    capture_output=True,
+                    text=True
+                )
+                if result.returncode != 0:
+                    print(f"❌ Docker compose failed: {result.stderr}")
+                    return
+            except Exception as e:
+                print(f"❌ Failed to run docker-compose: {e}")
+                return
+
+        # Wait for container to be healthy
+        print("⏳ Waiting for PostgreSQL to be ready...")
+        max_attempts = 30
+        for attempt in range(max_attempts):
+            try:
+                result = subprocess.run(
+                    ['docker', 'inspect', '-f', '{{.State.Health.Status}}', container_name],
+                    capture_output=True,
+                    text=True
+                )
+                health = result.stdout.strip()
+                if health == 'healthy':
+                    break
+                await asyncio.sleep(2)
+            except Exception:
+                await asyncio.sleep(2)
+        else:
+            print("⚠️  Container did not become healthy in time")
+            print("   Check logs with: docker logs hybridrag-postgres")
+            return
+
+        print("✅ PostgreSQL with pgvector is ready!")
+        self._print_docker_connection_info(port, password)
+
+    def _print_docker_connection_info(self, port: int, password: str):
+        """Print connection information for Docker PostgreSQL."""
+        print("\n📌 Connection Details:")
+        print(f"   Host:     localhost:{port}")
+        print("   Database: hybridrag")
+        print("   User:     hybridrag")
+        print(f"   Password: {password}")
+        print("\n📋 Connection String:")
+        print(f"   postgresql://hybridrag:{password}@localhost:{port}/hybridrag")
+        print("\n📚 Register a database with this backend:")
+        print("   python hybridrag.py db register mydb \\")
+        print("     --backend postgres \\")
+        print(f"     --connection-string postgresql://hybridrag:{password}@localhost:{port}/hybridrag \\")
+        print("     --path ./mydb --source ./data")
+        print("\n🔧 Manage container:")
+        print("   docker logs hybridrag-postgres    # View logs")
+        print("   docker stop hybridrag-postgres    # Stop container")
+        print("   docker start hybridrag-postgres   # Start container")
+
+    async def run_migrate(self):
+        """
+        Run data migration from JSON to PostgreSQL (T020).
+
+        Implements:
+        - Watcher pause during migration (T024)
+        - MigrationJob orchestration (T021)
+        - Checkpoint/resume support (T022)
+        - Post-migration verification (T023)
+        - Staged migration with backup (Phase 7)
+        """
+        from pathlib import Path
+        from src.database_registry import get_registry
+        from src.migration import MigrationJob, MigrationVerifier, MigrationCheckpoint
+        from src.migration import DatabaseBackup, StagedMigration
+        from src.config.config import BackendConfig
+
+        # Get arguments
+        db_name = getattr(self.args, 'name', None)
+        # Fall back to --db flag if no positional argument provided
+        if not db_name and self._db_entry:
+            db_name = self._db_entry.name
+        connection_string = getattr(self.args, 'connection_string', None)
+        batch_size = getattr(self.args, 'batch_size', 1000)
+        dry_run = getattr(self.args, 'dry_run', False)
+        skip_verify = getattr(self.args, 'skip_verify', False)
+        resume_job_id = getattr(self.args, 'resume', None)
+        pause_watcher = getattr(self.args, 'pause_watcher', True)
+        skip_confirm = getattr(self.args, 'yes', False)
+
+        # Staged migration options (Phase 7)
+        staged_mode = getattr(self.args, 'staged', False)
+        backup_only = getattr(self.args, 'backup_only', False)
+        rollback_id = getattr(self.args, 'rollback', None)
+        list_backups = getattr(self.args, 'list_backups', False)
+
+        # Load registry and find database
+        try:
+            registry = get_registry()
+        except Exception as e:
+            print(f"❌ Failed to load registry: {e}")
+            return
+
+        entry = registry.get(db_name)
+        if not entry:
+            print(f"❌ Database not found: {db_name}")
+            print("\nRegistered databases:")
+            for db in registry.list_all():
+                print(f"  - {db.name}")
+            return
+
+        # Get source path first (needed for all operations)
+        source_path = Path(entry.path)
+        if not source_path.exists():
+            print(f"❌ Database path not found: {source_path}")
+            return
+
+        # ─────────────────────────────────────────────────────────────────
+        # Phase 7: Backup Operations (backup-only, list-backups, rollback)
+        # These don't require connection string - work with local files only
+        # ─────────────────────────────────────────────────────────────────
+
+        # List backups option
+        if list_backups:
+            backup_mgr = DatabaseBackup(db_name, source_path)
+            backups = backup_mgr.list_backups()
+
+            if not backups:
+                print(f"\n📋 No backups found for '{db_name}'")
+                return
+
+            print(f"\n📋 Backups for '{db_name}'")
+            print("="*60)
+            for b in backups:
+                size_kb = b.total_size_bytes / 1024
+                print(f"   {b.backup_id:20} | {b.file_count:3} files | {size_kb:,.1f} KB | {b.created_at[:19]}")
+            print("="*60)
+            return
+
+        # Backup only option
+        if backup_only:
+            print(f"\n💾 Creating backup for '{db_name}'...")
+            backup_mgr = DatabaseBackup(db_name, source_path)
+            metadata = backup_mgr.create_backup()
+            print("\n✅ Backup created successfully")
+            print(f"   Backup ID:  {metadata.backup_id}")
+            print(f"   Files:      {metadata.file_count}")
+            print(f"   Size:       {metadata.total_size_bytes / 1024:.1f} KB")
+            print(f"   Location:   {metadata.backup_path}")
+            return
+
+        # Rollback option
+        if rollback_id:
+            print(f"\n⏪ Rolling back '{db_name}' to backup: {rollback_id}")
+            backup_mgr = DatabaseBackup(db_name, source_path)
+
+            # Verify backup exists
+            backups = backup_mgr.list_backups()
+            backup_exists = any(b.backup_id == rollback_id for b in backups)
+
+            if not backup_exists:
+                print(f"❌ Backup not found: {rollback_id}")
+                print("\nAvailable backups:")
+                for b in backups:
+                    print(f"   - {b.backup_id}")
+                return
+
+            if not skip_confirm:
+                print("\n⚠️  Warning: This will overwrite current database files")
+                response = input("Proceed with rollback? [y/N] ").strip().lower()
+                if response != 'y':
+                    print("Rollback cancelled")
+                    return
+
+            success = backup_mgr.restore_backup(rollback_id)
+            if success:
+                print(f"\n✅ Rollback complete - database restored from {rollback_id}")
+            else:
+                print("\n❌ Rollback failed")
+            return
+
+        # ─────────────────────────────────────────────────────────────────
+        # For migration operations (not backup-only), validate prerequisites
+        # ─────────────────────────────────────────────────────────────────
+
+        # Check source backend
+        source_backend = getattr(entry, 'backend_type', 'json') or 'json'
+        if source_backend != 'json':
+            print(f"❌ Database '{db_name}' is already using {source_backend} backend")
+            print("   Migration is only supported from JSON to PostgreSQL")
+            return
+
+        # Get or validate connection string
+        if not connection_string:
+            # Try to get from backend config
+            backend_cfg = getattr(entry, 'backend_config', None) or {}
+            if isinstance(backend_cfg, dict) and backend_cfg.get('connection_string'):
+                connection_string = backend_cfg['connection_string']
+            else:
+                print("❌ No connection string specified")
+                print("\nProvide connection string via:")
+                print("  --connection-string postgresql://user:pass@host:5432/db")
+                print("\nOr register the database with backend config:")
+                print(f"  python hybridrag.py db register {db_name} --backend postgres --connection-string ...")
+                return
+
+        # Preview mode
+        if dry_run:
+            print("\n🔍 DRY RUN - Migration Preview")
+            print("="*50)
+            print(f"Database:   {db_name}")
+            print(f"Source:     {source_path}")
+            print("Target:     PostgreSQL")
+            print(f"Batch Size: {batch_size}")
+
+            # Count records in each category
+            import json as json_lib
+            counts = {}
+            json_files = [
+                ('kv_store_full_docs.json', 'entities'),
+                ('graph_chunk_entity_relation.json', 'relations'),
+                ('text_chunks.json', 'chunks'),
+                ('doc_status.json', 'documents'),
+            ]
+            for filename, label in json_files:
+                filepath = source_path / filename
+                if filepath.exists():
+                    try:
+                        with open(filepath, 'r') as f:
+                            data = json_lib.load(f)
+                            counts[label] = len(data) if isinstance(data, dict) else 0
+                    except Exception:
+                        counts[label] = 0
+                else:
+                    counts[label] = 0
+
+            print("\n📊 Records to Migrate:")
+            total = sum(counts.values())
+            for label, count in counts.items():
+                print(f"   {label.capitalize():12} {count:>8,}")
+            print(f"   {'Total':12} {total:>8,}")
+
+            print("\n✓ No changes made (dry run)")
+            return
+
+        # Confirmation
+        if not skip_confirm:
+            print("\n⚠️  Migration Warning")
+            print("="*50)
+            print(f"Database: {db_name}")
+            print(f"From:     JSON ({source_path})")
+            print("To:       PostgreSQL")
+            print("\nThis will copy all data to PostgreSQL.")
+            print("The original JSON files will be preserved.")
+
+            response = input("\nProceed with migration? [y/N] ").strip().lower()
+            if response != 'y':
+                print("Migration cancelled")
+                return
+
+        # Pause watcher if requested (T024)
+        watcher_was_running = False
+        if pause_watcher:
+            try:
+                from src.watcher_control import pause_watcher as do_pause
+                watcher_was_running = await do_pause(db_name)
+                if watcher_was_running:
+                    print(f"⏸️  Paused watcher for '{db_name}'")
+            except ImportError:
+                # Watcher control not available - not critical
+                pass
+            except Exception as e:
+                print(f"⚠️  Could not pause watcher: {e}")
+
+        try:
+            # ─────────────────────────────────────────────────────────────────
+            # Phase 7: Staged Migration Workflow (if --staged is specified)
+            # ─────────────────────────────────────────────────────────────────
+            if staged_mode:
+                print(f"\n🔄 STAGED MIGRATION for '{db_name}'")
+                print("="*60)
+                print("Workflow: Backup → Staging → Verify → Promote")
+                print("="*60)
+
+                staged = StagedMigration(
+                    database_name=db_name,
+                    source_path=source_path,
+                    target_connection=connection_string,
+                )
+
+                # Check if resuming a previous staged migration
+                if staged.state['phase'] not in ('initial', 'promoted', 'rolled_back'):
+                    print(f"\n⚠️  Previous staged migration detected at phase: {staged.state['phase']}")
+                    print("   Resuming from last checkpoint...")
+
+                # Phase 1: Prepare (create backup)
+                if staged.state['phase'] in ('initial',):
+                    print("\n📦 Phase 1/4: Creating backup...")
+                    if not await staged.prepare():
+                        print("❌ Preparation failed")
+                        return
+                    print(f"   ✓ Backup created: {staged.state['backup_id']}")
+
+                # Phase 2: Migrate to staging tables
+                if staged.state['phase'] in ('prepared',):
+                    print("\n🚀 Phase 2/4: Migrating to staging...")
+                    if not await staged.migrate_to_staging():
+                        print("❌ Staging migration failed")
+                        print(f"   Backup available: {staged.state['backup_id']}")
+                        print(f"   To rollback: python hybridrag.py backend migrate {db_name} --rollback {staged.state['backup_id']}")
+                        return
+                    print("   ✓ Data migrated to staging tables")
+
+                # Phase 3: Verify staging
+                if staged.state['phase'] in ('staged',):
+                    print("\n🔍 Phase 3/4: Verifying staged data...")
+                    if not await staged.verify_staging():
+                        print("\n❌ Verification failed - NOT promoting to production")
+                        print(f"   Backup available: {staged.state['backup_id']}")
+                        print(f"   To rollback: python hybridrag.py backend migrate {db_name} --rollback {staged.state['backup_id']}")
+                        return
+                    print("   ✓ Verification passed")
+
+                # Phase 4: Promote staging to production
+                if staged.state['phase'] in ('verified',):
+                    print("\n⬆️  Phase 4/4: Promoting staging to production...")
+                    if not await staged.promote():
+                        print("❌ Promotion failed")
+                        print(f"   Backup available: {staged.state['backup_id']}")
+                        return
+                    print("   ✓ Staging tables promoted to production")
+
+                # Success! Update registry to use PostgreSQL backend (BUG-004 fix)
+                try:
+                    registry.update(
+                        db_name,
+                        backend_type='postgres',
+                        backend_config={
+                            'connection_string': connection_string,
+                            'workspace': db_name,
+                        }
+                    )
+                except Exception as e:
+                    print(f"\n⚠️  Registry update failed: {e}")
+                    print("   You may need to manually update the registry")
+
+                print("\n" + "="*60)
+                print("✅ STAGED MIGRATION COMPLETED SUCCESSFULLY")
+                print("="*60)
+                print(f"\n📝 Registry updated: '{db_name}' now uses PostgreSQL backend")
+                print(f"Backup retained: {staged.state['backup_id']}")
+                print(f"To rollback if needed: python hybridrag.py backend migrate {db_name} --rollback {staged.state['backup_id']}")
+
+            else:
+                # ─────────────────────────────────────────────────────────────────
+                # Standard Migration (original flow without staging)
+                # ─────────────────────────────────────────────────────────────────
+                # Create BackendConfig from connection string
+                target_config = BackendConfig.from_connection_string(connection_string)
+                target_config.postgres_workspace = db_name  # Use db_name as workspace
+
+                # Set up checkpoint file path
+                checkpoint_file = source_path / '.migration_checkpoint.json'
+
+                # Check for existing checkpoint to resume
+                existing_checkpoint = None
+                if resume_job_id:
+                    existing_checkpoint = MigrationCheckpoint.load(checkpoint_file)
+                    if existing_checkpoint and existing_checkpoint.job_id != resume_job_id:
+                        print(f"⚠️  Checkpoint job ID mismatch: expected {resume_job_id}, found {existing_checkpoint.job_id}")
+                        existing_checkpoint = None
+
+                # Create migration job
+                print(f"\n🚀 Starting migration for '{db_name}'...")
+                job = MigrationJob(
+                    source_path=str(source_path),
+                    target_config=target_config,
+                    checkpoint_file=str(checkpoint_file),
+                    batch_size=batch_size,
+                    continue_on_error=True,
+                )
+
+                # Resume or run
+                if resume_job_id and existing_checkpoint:
+                    print(f"📥 Resuming job: {resume_job_id}")
+                    # MigrationJob auto-loads checkpoint in __init__, so just run()
+                result = await job.run(verify=not skip_verify)
+
+                # Show results
+                print("\n" + "="*50)
+                if result.success:
+                    print("✅ MIGRATION COMPLETED SUCCESSFULLY")
+                else:
+                    print("❌ MIGRATION FAILED")
+
+                # Access checkpoint for detailed stats
+                checkpoint = result.checkpoint
+                print(f"\nJob ID: {checkpoint.job_id}")
+                print(f"Status: {result.status.value}")
+                print(f"Duration: {result.duration_seconds:.1f}s")
+
+                total_records = (checkpoint.entities_total + checkpoint.relations_total +
+                               checkpoint.chunks_total + checkpoint.docs_total)
+                migrated_records = (checkpoint.entities_migrated + checkpoint.relations_migrated +
+                                   checkpoint.chunks_migrated + checkpoint.docs_migrated)
+                failed_records = total_records - migrated_records
+
+                print("\nRecords:")
+                print(f"   Total:    {total_records:,}")
+                print(f"   Migrated: {migrated_records:,}")
+                print(f"   Failed:   {failed_records:,}")
+
+                if checkpoint.last_error:
+                    print(f"\n❌ Error: {checkpoint.last_error}")
+
+                # Show verification result if run internally
+                if result.verification_passed is not None:
+                    if result.verification_passed:
+                        print("\n✅ Post-migration verification passed")
+                    else:
+                        print("\n⚠️  Post-migration verification found discrepancies")
+
+                # Update registry to use PostgreSQL backend (BUG-004 fix)
+                if result.success:
+                    try:
+                        registry.update(
+                            db_name,
+                            backend_type='postgres',
+                            backend_config={
+                                'connection_string': connection_string,
+                                'workspace': db_name,
+                            }
+                        )
+                        print(f"\n📝 Registry updated: '{db_name}' now uses PostgreSQL backend")
+                    except Exception as e:
+                        print(f"\n⚠️  Registry update failed: {e}")
+                        print("   Run: python hybridrag.py db update <name> --backend postgres --connection-string <conn>")
+
+        finally:
+            # Resume watcher if it was paused (T024)
+            if pause_watcher and watcher_was_running:
+                try:
+                    from src.watcher_control import resume_watcher as do_resume
+                    await do_resume(db_name)
+                    print(f"▶️  Resumed watcher for '{db_name}'")
+                except ImportError:
+                    pass
+                except Exception as e:
+                    print(f"⚠️  Could not resume watcher: {e}")
+
+    async def show_backend_status(self):
+        """Show backend status with storage metrics."""
+        try:
+            registry = get_registry()
+        except Exception as e:
+            print(f"❌ Failed to load registry: {e}")
+            return
+
+        # Determine which database to show status for
+        name = getattr(self.args, 'name', None)
+        # Fall back to --db flag if no positional argument provided
+        if not name and self._db_entry:
+            name = self._db_entry.name
+        output_json = getattr(self.args, 'json', False)
+        verbose = getattr(self.args, 'verbose', False)
+
+        if name:
+            entry = registry.get(name)
+            if not entry:
+                print(f"❌ Database not found: {name}")
+                return
+            await self._show_single_backend_status(entry, output_json, verbose)
+        else:
+            # Show status for all databases
+            databases = registry.list_all()
+            if not databases:
+                print("❌ No databases registered")
+                return
+
+            if output_json:
+                results = []
+                for entry in databases:
+                    status = await self._collect_backend_metrics(entry, verbose)
+                    results.append(status)
+                print(json.dumps(results, indent=2, default=str))
+            else:
+                print("\n📊 Backend Status Overview")
+                print("="*70)
+                for entry in databases:
+                    await self._show_single_backend_status(entry, False, verbose)
+                    print("-"*70)
+
+    async def _show_single_backend_status(self, entry: 'DatabaseEntry', output_json: bool, verbose: bool):
+        """Show backend status for a single database."""
+        metrics = await self._collect_backend_metrics(entry, verbose)
+
+        if output_json:
+            print(json.dumps(metrics, indent=2, default=str))
+            return
+
+        # Header
+        print(f"\n🗄️  Database: {entry.name}")
+        print(f"   Backend Type: {metrics['backend_type']}")
+        print(f"   Path: {entry.path}")
+
+        # Connection status
+        conn_status = "🟢 Connected" if metrics['connected'] else "🔴 Disconnected"
+        print(f"   Connection: {conn_status}")
+
+        # Entity/relation counts
+        print("\n   📈 Storage Metrics:")
+        print(f"      Entities:    {metrics.get('entity_count', 'N/A'):,}")
+        print(f"      Relations:   {metrics.get('relation_count', 'N/A'):,}")
+        print(f"      Chunks:      {metrics.get('chunk_count', 'N/A'):,}")
+        print(f"      Documents:   {metrics.get('doc_count', 'N/A'):,}")
+
+        # File sizes (JSON backend only)
+        if metrics['backend_type'] == 'json' and 'storage_size' in metrics:
+            storage = metrics['storage_size']
+            print("\n   💾 Storage Size:")
+            print(f"      Total:       {storage.get('total_mb', 0):.2f} MB")
+
+            if verbose and 'files' in storage:
+                for fname, size_mb in storage['files'].items():
+                    print(f"        {fname}: {size_mb:.2f} MB")
+
+            # Warnings
+            warnings = metrics.get('warnings', [])
+            if warnings:
+                print("\n   ⚠️  Warnings:")
+                for warning in warnings:
+                    print(f"      - {warning}")
+
+        # PostgreSQL connection info
+        if metrics['backend_type'] == 'postgres' and verbose:
+            config = metrics.get('connection_config', {})
+            if config:
+                print("\n   🔗 Connection Details:")
+                print(f"      Host: {config.get('host', 'N/A')}:{config.get('port', 'N/A')}")
+                print(f"      Database: {config.get('database', 'N/A')}")
+                print(f"      Workspace: {config.get('workspace', 'N/A')}")
+
+    async def _collect_backend_metrics(self, entry: 'DatabaseEntry', verbose: bool) -> dict:
+        """Collect backend metrics for a database entry."""
+        # Get backend configuration
+        backend_config = entry.get_backend_config()
+        backend_type = backend_config.backend_type.value
+
+        metrics = {
+            'database_name': entry.name,
+            'backend_type': backend_type,
+            'path': str(entry.path),
+            'connected': False,
+            'entity_count': 0,
+            'relation_count': 0,
+            'chunk_count': 0,
+            'doc_count': 0,
+            'warnings': []
+        }
+
+        try:
+            if backend_type == 'json':
+                metrics.update(await self._collect_json_metrics(entry.path, backend_config, verbose))
+            elif backend_type == 'postgres':
+                metrics.update(await self._collect_postgres_metrics(entry, backend_config, verbose))
+            else:
+                metrics['warnings'].append(f"Unknown backend type: {backend_type}")
+        except Exception as e:
+            metrics['warnings'].append(f"Error collecting metrics: {str(e)}")
+
+        return metrics
+
+    async def _collect_json_metrics(self, db_path: str, config: BackendConfig, verbose: bool) -> dict:
+        """Collect metrics for JSON file backend."""
+        from pathlib import Path
+
+        db_dir = Path(db_path)
+        metrics = {
+            'connected': db_dir.exists(),
+            'storage_size': {'total_mb': 0, 'files': {}},
+            'warnings': []
+        }
+
+        if not db_dir.exists():
+            metrics['warnings'].append(f"Database directory does not exist: {db_path}")
+            return metrics
+
+        # Count entities/relations from graph file
+        graph_file = db_dir / "graph_chunk_entity_relation.graphml"
+        if graph_file.exists():
+            try:
+                import networkx as nx
+                graph = nx.read_graphml(str(graph_file))
+                metrics['entity_count'] = graph.number_of_nodes()
+                metrics['relation_count'] = graph.number_of_edges()
+            except Exception as e:
+                metrics['warnings'].append(f"Could not read graph: {e}")
+
+        # Count chunks from vector storage
+        chunks_file = db_dir / "vdb_chunks.json"
+        if chunks_file.exists():
+            try:
+                with open(chunks_file, 'r') as f:
+                    chunk_data = json.load(f)
+                    if isinstance(chunk_data, dict):
+                        metrics['chunk_count'] = len(chunk_data.get('data', []))
+                    elif isinstance(chunk_data, list):
+                        metrics['chunk_count'] = len(chunk_data)
+            except Exception as e:
+                metrics['warnings'].append(f"Could not read chunks: {e}")
+
+        # Count documents from doc status
+        doc_status_file = db_dir / "kv_store_doc_status.json"
+        if doc_status_file.exists():
+            try:
+                with open(doc_status_file, 'r') as f:
+                    doc_data = json.load(f)
+                    metrics['doc_count'] = len(doc_data)
+            except Exception as e:
+                metrics['warnings'].append(f"Could not read doc status: {e}")
+
+        # Calculate file sizes
+        total_size = 0
+        for f in db_dir.glob("*.json"):
+            size_bytes = f.stat().st_size
+            size_mb = size_bytes / (1024 * 1024)
+            metrics['storage_size']['files'][f.name] = size_mb
+            total_size += size_mb
+
+            # Check threshold warnings
+            if size_mb > config.file_size_warning_mb:
+                metrics['warnings'].append(
+                    f"File {f.name} exceeds {config.file_size_warning_mb}MB threshold: {size_mb:.1f}MB"
+                )
+
+        # Add graphml file size
+        if graph_file.exists():
+            size_bytes = graph_file.stat().st_size
+            size_mb = size_bytes / (1024 * 1024)
+            metrics['storage_size']['files'][graph_file.name] = size_mb
+            total_size += size_mb
+
+        metrics['storage_size']['total_mb'] = total_size
+
+        # Total size warning
+        if total_size > config.total_size_warning_mb:
+            metrics['warnings'].append(
+                f"Total storage exceeds {config.total_size_warning_mb}MB threshold: {total_size:.1f}MB. "
+                f"Consider migrating to PostgreSQL backend."
+            )
+
+        return metrics
+
+    async def _collect_postgres_metrics(self, entry: 'DatabaseEntry', config: BackendConfig, verbose: bool) -> dict:
+        """Collect metrics for PostgreSQL backend."""
+        metrics = {
+            'connected': False,
+            'warnings': [],
+            'connection_config': {
+                'host': config.postgres_host,
+                'port': config.postgres_port,
+                'database': config.postgres_database,
+                'workspace': config.postgres_workspace
+            }
+        }
+
+        try:
+            import asyncpg
+        except ImportError:
+            metrics['warnings'].append("asyncpg not installed - cannot query PostgreSQL metrics")
+            return metrics
+
+        try:
+            conn_str = config.get_connection_string()
+            if not conn_str:
+                metrics['warnings'].append("No PostgreSQL connection string configured")
+                return metrics
+
+            conn = await asyncpg.connect(conn_str)
+            try:
+                metrics['connected'] = True
+
+                workspace = config.postgres_workspace
+
+                # Count entities
+                entity_count = await conn.fetchval(
+                    "SELECT COUNT(*) FROM lightrag_entities WHERE workspace = $1",
+                    workspace
+                )
+                metrics['entity_count'] = entity_count or 0
+
+                # Count relations
+                relation_count = await conn.fetchval(
+                    "SELECT COUNT(*) FROM lightrag_relations WHERE workspace = $1",
+                    workspace
+                )
+                metrics['relation_count'] = relation_count or 0
+
+                # Count chunks
+                chunk_count = await conn.fetchval(
+                    "SELECT COUNT(*) FROM lightrag_chunks WHERE workspace = $1",
+                    workspace
+                )
+                metrics['chunk_count'] = chunk_count or 0
+
+                # Count documents
+                doc_count = await conn.fetchval(
+                    "SELECT COUNT(*) FROM lightrag_doc_status WHERE workspace = $1",
+                    workspace
+                )
+                metrics['doc_count'] = doc_count or 0
+
+            finally:
+                await conn.close()
+
+        except Exception as e:
+            metrics['warnings'].append(f"PostgreSQL connection error: {str(e)}")
+
+        return metrics
 
 
 def create_parser():
@@ -1682,11 +2742,8 @@ Examples:
     # Check-db command
     checkdb_parser = subparsers.add_parser('check-db', help='Check database and show statistics')
 
-    # List-dbs command
-    listdbs_parser = subparsers.add_parser('list-dbs', help='List all databases in current directory')
-
-    # Db-info command
-    dbinfo_parser = subparsers.add_parser('db-info', help='Show detailed database information with source folders')
+    # Note: 'list-dbs' removed - use 'db list' instead
+    # Note: 'db-info' removed - use 'db show <name>' instead
 
     # Snapshot command - quick status overview
     snapshot_parser = subparsers.add_parser('snapshot', help='Quick status snapshot: watchers, folders, files processed')
@@ -1721,6 +2778,21 @@ Examples:
     db_register.add_argument('--description', help='Database description')
     db_register.add_argument('--jira-project', help='JIRA project key (for specstory type)')
     db_register.add_argument('--extensions', help='File extensions to watch (comma-separated)')
+    # Backend configuration (T016)
+    db_register.add_argument('--backend', choices=['json', 'postgres'],
+                            default='json', help='Storage backend type (default: json)')
+    db_register.add_argument('--connection-string',
+                            help='PostgreSQL connection string (e.g., postgresql://user:pass@host:5432/db)')
+    db_register.add_argument('--postgres-host', default='localhost',
+                            help='PostgreSQL host (default: localhost)')
+    db_register.add_argument('--postgres-port', type=int, default=5432,
+                            help='PostgreSQL port (default: 5432)')
+    db_register.add_argument('--postgres-user', default='hybridrag',
+                            help='PostgreSQL user (default: hybridrag)')
+    db_register.add_argument('--postgres-password',
+                            help='PostgreSQL password (or set POSTGRES_PASSWORD env var)')
+    db_register.add_argument('--postgres-database', default='hybridrag',
+                            help='PostgreSQL database name (default: hybridrag)')
 
     # db list
     db_list = db_subparsers.add_parser('list', help='List all registered databases')
@@ -1730,6 +2802,8 @@ Examples:
     db_show = db_subparsers.add_parser('show', help='Show database details')
     db_show.add_argument('name', help='Database name')
     db_show.add_argument('--json', action='store_true', help='Output as JSON')
+    db_show.add_argument('--stats', action='store_true',
+                        help='Include knowledge graph stats (entities, relations, chunks, documents)')
 
     # db update
     db_update = db_subparsers.add_parser('update', help='Update database settings')
@@ -1768,6 +2842,59 @@ Examples:
     # db watch status
     db_watch_status = db_watch_subparsers.add_parser('status', help='Show watcher status')
     db_watch_status.add_argument('name', nargs='?', help='Database name (optional)')
+
+    # ========================================
+    # Backend Management Commands
+    # ========================================
+    backend_parser = subparsers.add_parser('backend', help='Storage backend management')
+    backend_subparsers = backend_parser.add_subparsers(dest='backend_command', help='Backend command')
+
+    # backend status
+    backend_status = backend_subparsers.add_parser('status', help='Show backend status and metrics')
+    backend_status.add_argument('name', nargs='?', help='Database name (optional, uses current db if not specified)')
+    backend_status.add_argument('--json', action='store_true', help='Output as JSON')
+    backend_status.add_argument('--verbose', '-v', action='store_true', help='Show detailed metrics')
+
+    # backend setup-docker (T018)
+    backend_docker = backend_subparsers.add_parser('setup-docker',
+                                                   help='Auto-provision PostgreSQL with pgvector via Docker')
+    backend_docker.add_argument('--port', type=int, default=5432,
+                               help='Host port for PostgreSQL (default: 5432)')
+    backend_docker.add_argument('--password', default='hybridrag_default',
+                               help='PostgreSQL password (default: hybridrag_default)')
+    backend_docker.add_argument('--data-dir',
+                               help='Host path for persistent data (default: Docker volume)')
+    backend_docker.add_argument('--force', action='store_true',
+                               help='Force recreate container even if running')
+
+    # backend migrate (T020)
+    backend_migrate = backend_subparsers.add_parser('migrate',
+                                                    help='Migrate database from JSON to PostgreSQL')
+    backend_migrate.add_argument('name', help='Database name to migrate')
+    backend_migrate.add_argument('--connection-string',
+                                help='PostgreSQL connection string (or uses registered backend config)')
+    backend_migrate.add_argument('--batch-size', type=int, default=1000,
+                                help='Batch size for migration (default: 1000)')
+    backend_migrate.add_argument('--dry-run', action='store_true',
+                                help='Preview migration without making changes')
+    backend_migrate.add_argument('--skip-verify', action='store_true',
+                                help='Skip post-migration verification')
+    backend_migrate.add_argument('--resume', metavar='JOB_ID',
+                                help='Resume a previous migration job')
+    backend_migrate.add_argument('--pause-watcher', action='store_true', default=True,
+                                help='Pause watcher during migration (default: True)')
+    backend_migrate.add_argument('--yes', '-y', action='store_true',
+                                help='Skip confirmation prompts')
+
+    # Staged migration options (Phase 7 - safe migration with backup)
+    backend_migrate.add_argument('--staged', action='store_true',
+                                help='Use staged migration: backup → staging → verify → promote')
+    backend_migrate.add_argument('--backup-only', action='store_true',
+                                help='Create backup without migrating')
+    backend_migrate.add_argument('--rollback', metavar='BACKUP_ID',
+                                help='Rollback to a previous backup')
+    backend_migrate.add_argument('--list-backups', action='store_true',
+                                help='List available backups for the database')
 
     return parser
 

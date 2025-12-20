@@ -24,6 +24,9 @@ from enum import Enum
 
 import yaml
 
+# Import BackendType and BackendConfig for backend support
+from src.config.config import BackendType, BackendConfig
+
 
 # Database naming pattern: alphanumeric + hyphens, must start/end with alphanumeric
 DATABASE_NAME_PATTERN = re.compile(r'^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$')
@@ -112,6 +115,10 @@ class DatabaseEntry:
     api_config: Optional[Dict[str, Any]] = None
     schema_config: Optional[Dict[str, Any]] = None
 
+    # Storage backend configuration (NEW for pluggable backend support)
+    backend_type: str = "json"  # json, postgres, mongodb
+    backend_config: Optional[Dict[str, Any]] = None
+
     def __post_init__(self):
         """Validate and normalize fields."""
         # Normalize paths to absolute (if provided)
@@ -163,6 +170,22 @@ class DatabaseEntry:
         if self.schema_config:
             return SchemaConfig.from_dict(self.schema_config)
         return None
+
+    def get_backend_config(self) -> BackendConfig:
+        """Get typed Backend configuration.
+
+        Returns:
+            BackendConfig instance with backend settings.
+            If no backend_config is stored, returns default config
+            with the stored backend_type.
+        """
+        backend_type_enum = BackendType.from_string(self.backend_type)
+        if self.backend_config is None:
+            return BackendConfig(backend_type=backend_type_enum)
+        return BackendConfig(
+            backend_type=backend_type_enum,
+            **self.backend_config
+        )
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for YAML storage."""
@@ -259,7 +282,9 @@ class DatabaseRegistry:
         specstory_config: Optional[Dict[str, Any]] = None,
         api_config: Optional[Dict[str, Any]] = None,
         schema_config: Optional[Dict[str, Any]] = None,
-        preprocessing_pipeline: Optional[List[str]] = None
+        preprocessing_pipeline: Optional[List[str]] = None,
+        backend_type: str = "json",
+        backend_config: Optional[Dict[str, Any]] = None
     ) -> DatabaseEntry:
         """
         Register a new database.
@@ -279,6 +304,8 @@ class DatabaseRegistry:
             api_config: API-specific settings (for source_type='api')
             schema_config: Schema-specific settings (for source_type='schema')
             preprocessing_pipeline: Ordered list of preprocessing steps
+            backend_type: Storage backend type ('json', 'postgres', 'mongodb')
+            backend_config: Backend-specific settings (PostgreSQL connection params, etc.)
 
         Returns:
             DatabaseEntry for the registered database
@@ -286,7 +313,11 @@ class DatabaseRegistry:
         Raises:
             ValueError: If name is invalid or already exists
         """
-        name = name.lower()
+        # Strip whitespace and convert to lowercase (BUG-008 fix)
+        name = name.strip().lower()
+
+        if not name:
+            raise ValueError("Database name cannot be empty or whitespace-only")
 
         if name in self.data.get("databases", {}):
             raise ValueError(f"Database '{name}' is already registered. Use update() to modify.")
@@ -305,7 +336,9 @@ class DatabaseRegistry:
             specstory_config=specstory_config,
             api_config=api_config,
             schema_config=schema_config,
-            preprocessing_pipeline=preprocessing_pipeline
+            preprocessing_pipeline=preprocessing_pipeline,
+            backend_type=backend_type,
+            backend_config=backend_config
         )
 
         if "databases" not in self.data:
@@ -702,7 +735,7 @@ def acquire_watcher_lock(db_name: str, pid: int) -> Optional[int]:
         # Return fd - caller must keep it open to maintain lock
         return fd
 
-    except OSError as e:
+    except OSError:
         # Failed to open/create file
         return None
 
@@ -786,14 +819,15 @@ def is_watcher_running(db_name: str) -> tuple[bool, Optional[int]]:
         # Check if process is actually running
         if _check_pid_running(pid):
             # Process exists - verify it holds the lock
-            # Try to acquire lock non-blocking
+            # BUG-010 fix: Use O_RDONLY to avoid race with file deletion,
+            # and ensure fd is always closed even on exceptions
+            fd = None
             try:
-                fd = os.open(str(pid_file), os.O_RDWR, 0o644)
+                fd = os.open(str(pid_file), os.O_RDONLY)
                 try:
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     # We got the lock - process is NOT holding it (stale PID file)
                     fcntl.flock(fd, fcntl.LOCK_UN)
-                    os.close(fd)
                     # Clean up stale PID file
                     try:
                         pid_file.unlink()
@@ -802,11 +836,16 @@ def is_watcher_running(db_name: str) -> tuple[bool, Optional[int]]:
                     return False, None
                 except (IOError, OSError):
                     # Lock is held - watcher is truly running
-                    os.close(fd)
                     return True, pid
             except OSError:
                 # Can't open file - check if process is running based on PID alone
                 return _check_pid_running(pid), pid if _check_pid_running(pid) else None
+            finally:
+                if fd is not None:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
         else:
             # Process not running - clean up stale PID file
             try:

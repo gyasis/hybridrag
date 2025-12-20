@@ -20,6 +20,9 @@ from lightrag.utils import EmbeddingFunc
 import litellm
 from dotenv import load_dotenv
 
+# Import backend configuration
+from src.config.config import BackendType, BackendConfig
+
 # Load environment variables
 load_dotenv()
 
@@ -259,15 +262,26 @@ class HybridLightRAGCore:
     # Default max cache size for context cache
     DEFAULT_CACHE_MAX_SIZE = 1000
 
-    def __init__(self, config, cache_max_size: int = DEFAULT_CACHE_MAX_SIZE):
+    def __init__(
+        self,
+        config,
+        cache_max_size: int = DEFAULT_CACHE_MAX_SIZE,
+        backend_config: Optional[BackendConfig] = None
+    ):
         """
         Initialize Hybrid LightRAG Core.
 
         Args:
             config: HybridRAGConfig instance
             cache_max_size: Maximum size for context cache (default 1000)
+            backend_config: Optional storage backend configuration. If None,
+                           uses default JSON backend (NanoVectorDB + NetworkX).
+                           Pass BackendConfig(backend_type=BackendType.POSTGRESQL, ...)
+                           to use PostgreSQL with pgvector.
         """
         self.config = config.lightrag
+        # Store backend configuration (default to JSON backend if not provided)
+        self.backend_config = backend_config or BackendConfig()
         self._setup_api_key()
         self._ensure_working_dir()
         self._init_lightrag()
@@ -275,7 +289,8 @@ class HybridLightRAGCore:
         # Use LRU cache with bounded size to prevent memory leaks
         self.context_cache = LRUCache(max_size=cache_max_size)
 
-        logger.info(f"HybridLightRAGCore initialized with working dir: {self.config.working_dir}")
+        backend_info = f", backend: {self.backend_config.backend_type.value}"
+        logger.info(f"HybridLightRAGCore initialized with working dir: {self.config.working_dir}{backend_info}")
     
     def _setup_api_key(self):
         """Setup API key and configure LiteLLM for Azure/OpenAI."""
@@ -321,8 +336,14 @@ class HybridLightRAGCore:
         logger.info(f"Working directory ready: {working_dir}")
     
     def _init_lightrag(self):
-        """Initialize LightRAG instance with LiteLLM for provider-agnostic access."""
-        logger.info("Initializing LightRAG instance with LiteLLM")
+        """Initialize LightRAG instance with LiteLLM for provider-agnostic access.
+
+        Uses backend_config to determine storage classes:
+        - JSON backend (default): JsonKVStorage, NanoVectorDBStorage, NetworkXStorage
+        - PostgreSQL backend: PGKVStorage, PGVectorStorage, PGGraphStorage
+        """
+        backend_type = self.backend_config.backend_type.value
+        logger.info(f"Initializing LightRAG instance with LiteLLM (backend: {backend_type})")
 
         # Known LiteLLM-compatible kwargs (filter out LightRAG internal objects)
         LITELLM_ALLOWED_KWARGS = {
@@ -429,16 +450,50 @@ class HybridLightRAGCore:
                 operation_name="LiteLLM embedding"
             )
 
-        # Initialize LightRAG with LiteLLM functions
-        self.rag = LightRAG(
-            working_dir=self.config.working_dir,
-            llm_model_func=llm_model_func,
-            llm_model_max_async=self.config.max_async,
-            embedding_func=EmbeddingFunc(
+        # Build LightRAG initialization kwargs
+        lightrag_kwargs = {
+            "working_dir": self.config.working_dir,
+            "llm_model_func": llm_model_func,
+            "llm_model_max_async": self.config.max_async,
+            "embedding_func": EmbeddingFunc(
                 embedding_dim=self.config.embedding_dim,
                 func=embedding_func
             )
-        )
+        }
+
+        # Configure storage backends based on backend_config
+        if self.backend_config.backend_type == BackendType.POSTGRESQL:
+            # PostgreSQL backend with pgvector
+            storage_classes = self.backend_config.get_storage_classes()
+            lightrag_kwargs.update({
+                "kv_storage": storage_classes["kv_storage"],
+                "vector_storage": storage_classes["vector_storage"],
+                "graph_storage": storage_classes["graph_storage"],
+                "doc_status_storage": storage_classes["doc_status_storage"],
+            })
+
+            # Set PostgreSQL environment variables for LightRAG's storage classes
+            env_vars = self.backend_config.get_env_vars()
+            for key, value in env_vars.items():
+                os.environ[key] = value
+
+            logger.info(
+                f"Configured PostgreSQL backend: "
+                f"{self.backend_config.postgres_host}:{self.backend_config.postgres_port}/"
+                f"{self.backend_config.postgres_database}"
+            )
+        elif self.backend_config.backend_type == BackendType.JSON:
+            # JSON backend (default) - uses LightRAG defaults
+            logger.info("Using default JSON backend (NanoVectorDB + NetworkX)")
+        else:
+            # Future backends (MongoDB, etc.)
+            logger.warning(
+                f"Backend type '{self.backend_config.backend_type.value}' not yet implemented. "
+                f"Falling back to JSON backend."
+            )
+
+        # Initialize LightRAG with configured backends
+        self.rag = LightRAG(**lightrag_kwargs)
         logger.info(f"LightRAG initialized with LiteLLM (model: {self.config.model_name})")
     
     async def _ensure_initialized(self):
@@ -698,14 +753,70 @@ class HybridLightRAGCore:
         
         return health
 
-def create_lightrag_core(config) -> HybridLightRAGCore:
+def get_storage_classes(backend_type: Union[BackendType, str]) -> Dict[str, str]:
+    """
+    Factory function to get LightRAG storage class names for a backend type.
+
+    Maps backend types to LightRAG's pluggable storage class names:
+    - JSON: JsonKVStorage, NanoVectorDBStorage, NetworkXStorage, JsonDocStatusStorage
+    - PostgreSQL: PGKVStorage, PGVectorStorage, PGGraphStorage, PGDocStatusStorage
+    - MongoDB: MongoKVStorage, MongoVectorDBStorage, MongoGraphStorage, MongoDocStatusStorage
+
+    Args:
+        backend_type: BackendType enum or string ('json', 'postgres', 'mongodb')
+
+    Returns:
+        Dict mapping storage type to LightRAG class name:
+        {
+            "kv_storage": "JsonKVStorage",
+            "vector_storage": "NanoVectorDBStorage",
+            "graph_storage": "NetworkXStorage",
+            "doc_status_storage": "JsonDocStatusStorage"
+        }
+
+    Example:
+        >>> get_storage_classes("json")
+        {'kv_storage': 'JsonKVStorage', ...}
+
+        >>> get_storage_classes(BackendType.POSTGRESQL)
+        {'kv_storage': 'PGKVStorage', ...}
+    """
+    # Convert string to BackendType if needed
+    if isinstance(backend_type, str):
+        backend_type = BackendType.from_string(backend_type)
+
+    # Use BackendConfig's get_storage_classes for consistency
+    config = BackendConfig(backend_type=backend_type)
+    return config.get_storage_classes()
+
+
+def create_lightrag_core(
+    config,
+    backend_config: Optional[BackendConfig] = None
+) -> HybridLightRAGCore:
     """
     Factory function to create HybridLightRAGCore instance.
-    
+
     Args:
         config: HybridRAGConfig instance
-        
+        backend_config: Optional storage backend configuration.
+                       If None, uses default JSON backend.
+
     Returns:
         HybridLightRAGCore instance
+
+    Example:
+        # Default JSON backend
+        core = create_lightrag_core(config)
+
+        # PostgreSQL backend
+        pg_config = BackendConfig(
+            backend_type=BackendType.POSTGRESQL,
+            postgres_host="localhost",
+            postgres_port=5432,
+            postgres_database="hybridrag",
+            postgres_password="secret"
+        )
+        core = create_lightrag_core(config, backend_config=pg_config)
     """
-    return HybridLightRAGCore(config)
+    return HybridLightRAGCore(config, backend_config=backend_config)

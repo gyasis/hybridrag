@@ -8,11 +8,10 @@ Main monitoring dashboard showing databases, watchers, and activity.
 from pathlib import Path
 from textual.app import ComposeResult
 from textual.screen import Screen
-from textual.widgets import Static, Footer, Header
-from textual.containers import Container, Horizontal, Vertical
+from textual.widgets import Static, Footer
+from textual.containers import Container, Horizontal
 from textual.binding import Binding
 from textual.reactive import reactive
-from rich.panel import Panel
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
@@ -500,10 +499,24 @@ class DashboardScreen(Screen):
             return
 
         db = self.selected_database
+
+        # BUG-007 fix: Show symlink targets for path display
+        def format_path(path: str | None) -> str:
+            if not path:
+                return "N/A"
+            p = Path(path)
+            if p.is_symlink():
+                try:
+                    target = p.resolve()
+                    return f"{path} → {target}"
+                except (OSError, RuntimeError):
+                    return f"{path} [symlink]"
+            return path
+
         info_lines = [
             f"[bold]Database: {db.name}[/bold]",
-            f"Path: {db.path}",
-            f"Source: {db.source_folder or 'N/A'}",
+            f"Path: {format_path(db.path)}",
+            f"Source: {format_path(db.source_folder)}",
             f"Type: {db.source_type}",
             f"Size: {db.total_size_human}",
             f"Entities: {db.entity_count:,}",
@@ -607,7 +620,6 @@ class DashboardScreen(Screen):
         # KEY FIX: Change the screen's grid-rows to collapse hidden rows
         # Normal: auto 12 10 12 1fr auto auto (header, timeline, db, watcher, bottom, status, footer)
         # Maximized: auto 1fr auto auto (header, maximized-section, status, footer)
-        from textual.css.scalar import Scalar, Unit
         self.styles.grid_rows = "auto 1fr auto auto"
 
         # Make the visible section expand to fill available space

@@ -39,6 +39,99 @@ from src.database_registry import (
     is_watcher_running
 )
 from src.alerting import get_alert_manager, AlertSeverity
+from src.config.config import BackendConfig, BackendType
+
+
+class PerformanceTracker:
+    """
+    Tracks ingestion performance metrics with rolling average calculation.
+
+    Used for proactive performance monitoring (T012-T013):
+    - Maintains a rolling window of recent ingestion rates (docs/minute)
+    - Detects performance degradation when current rate drops below baseline
+    - Warns users when ingestion is >50% slower than baseline
+    """
+
+    def __init__(self, window_size: int = 20, degradation_threshold_pct: int = 50):
+        """
+        Initialize performance tracker.
+
+        Args:
+            window_size: Number of ingestion cycles to include in rolling average
+            degradation_threshold_pct: Warn when performance drops by this percentage
+        """
+        self._window_size = window_size
+        self._degradation_threshold_pct = degradation_threshold_pct
+        self._rates: List[float] = []  # docs/minute for each cycle
+        self._baseline_rate: Optional[float] = None
+        self._cycles_since_warning = 0
+        self._warning_cooldown = 5  # Only warn every N cycles
+
+    def record_ingestion(self, docs_count: int, duration_seconds: float) -> Optional[Dict]:
+        """
+        Record an ingestion cycle and check for performance degradation.
+
+        Args:
+            docs_count: Number of documents ingested
+            duration_seconds: Time taken for ingestion
+
+        Returns:
+            Dict with warning details if degradation detected, None otherwise
+        """
+        if duration_seconds <= 0 or docs_count <= 0:
+            return None
+
+        # Calculate rate (docs/minute)
+        docs_per_minute = (docs_count / duration_seconds) * 60.0
+
+        # Add to rolling window
+        self._rates.append(docs_per_minute)
+        if len(self._rates) > self._window_size:
+            self._rates.pop(0)
+
+        # Update baseline after sufficient data
+        if len(self._rates) >= 5 and self._baseline_rate is None:
+            self._baseline_rate = self._calculate_average()
+            logger.info(f"📊 Performance baseline established: {self._baseline_rate:.1f} docs/min")
+
+        # Check for degradation
+        self._cycles_since_warning += 1
+        if self._baseline_rate and len(self._rates) >= 3 and self._cycles_since_warning >= self._warning_cooldown:
+            current_avg = self._calculate_recent_average()
+            degradation_pct = ((self._baseline_rate - current_avg) / self._baseline_rate) * 100
+
+            if degradation_pct >= self._degradation_threshold_pct:
+                self._cycles_since_warning = 0
+                return {
+                    'baseline_rate': self._baseline_rate,
+                    'current_rate': current_avg,
+                    'degradation_pct': degradation_pct,
+                    'threshold_pct': self._degradation_threshold_pct
+                }
+
+        return None
+
+    def _calculate_average(self) -> float:
+        """Calculate average of all recorded rates."""
+        if not self._rates:
+            return 0.0
+        return sum(self._rates) / len(self._rates)
+
+    def _calculate_recent_average(self) -> float:
+        """Calculate average of most recent 3 rates."""
+        if len(self._rates) < 3:
+            return self._calculate_average()
+        return sum(self._rates[-3:]) / 3
+
+    def get_stats(self) -> Dict:
+        """Get current performance statistics."""
+        return {
+            'baseline_rate': self._baseline_rate,
+            'current_avg': self._calculate_recent_average() if self._rates else None,
+            'sample_count': len(self._rates),
+            'window_size': self._window_size,
+            'degradation_threshold_pct': self._degradation_threshold_pct
+        }
 
 
 class BoundedSet:
@@ -248,8 +341,15 @@ class WatcherDaemon:
         self._core = None
         self._config = None
 
+        # Performance tracker for proactive monitoring (T012-T013)
+        # Threshold is loaded from backend_config after entry is loaded
+        self.performance_tracker: Optional[PerformanceTracker] = None
+
         # Load database entry (must be done first)
         self._load_entry()
+
+        # Initialize performance tracker with threshold from backend config
+        self._init_performance_tracker()
 
     def _load_ingested_hashes(self):
         """Load existing document hashes from the database's doc_status store."""
@@ -313,6 +413,22 @@ class WatcherDaemon:
         # Load existing document hashes from database
         self._load_ingested_hashes()
 
+    def _init_performance_tracker(self):
+        """
+        Initialize performance tracker with thresholds from backend config.
+
+        T014: Load configurable thresholds from registry backend_config.
+        """
+        backend_config = self.entry.get_backend_config()
+        degradation_threshold = backend_config.performance_degradation_pct
+
+        self.performance_tracker = PerformanceTracker(
+            window_size=20,
+            degradation_threshold_pct=degradation_threshold
+        )
+
+        logger.info(f"  Performance tracking enabled (degradation threshold: {degradation_threshold}%)")
+
     def _acquire_lock(self) -> bool:
         """
         Acquire exclusive lock on PID file to prevent duplicate daemons.
@@ -354,6 +470,10 @@ class WatcherDaemon:
 
         Reuses the same core instance across batches to avoid reloading
         the entire graph (56k nodes, 104k edges) on each batch.
+
+        Uses backend configuration from registry to determine storage backend:
+        - JSON backend (default): NanoVectorDB + NetworkX
+        - PostgreSQL backend: pgvector + Apache AGE
         """
         if self._core is None:
             logger.info("Lazy-initializing LightRAG core (first use)...")
@@ -366,7 +486,18 @@ class WatcherDaemon:
             if self.entry.model:
                 self._config.lightrag.model_name = self.entry.model
 
-            self._core = HybridLightRAGCore(self._config)
+            # Get backend configuration from registry entry
+            backend_config = self.entry.get_backend_config()
+            logger.info(f"Using backend: {backend_config.backend_type.value}")
+
+            if backend_config.backend_type == BackendType.POSTGRESQL:
+                logger.info(
+                    f"  PostgreSQL: {backend_config.postgres_host}:"
+                    f"{backend_config.postgres_port}/{backend_config.postgres_database}"
+                )
+
+            # Initialize core with backend configuration
+            self._core = HybridLightRAGCore(self._config, backend_config=backend_config)
             await self._core._ensure_initialized()
             logger.info("LightRAG core initialized successfully")
 
@@ -379,6 +510,86 @@ class WatcherDaemon:
             self._core = None
             self._config = None
             gc.collect()
+
+    def _check_json_file_sizes(self) -> None:
+        """
+        Check JSON storage file sizes against thresholds.
+
+        Proactive monitoring for JSON backend to warn users before OOM crashes.
+        Skips checks if using PostgreSQL backend (not applicable).
+
+        Thresholds from BackendConfig:
+        - file_size_warning_mb: Warn when any file exceeds this (default 500MB)
+        - total_size_warning_mb: Warn when total exceeds this (default 2GB)
+        """
+        # Skip if not using JSON backend
+        backend_config = self.entry.get_backend_config()
+        if backend_config.backend_type != BackendType.JSON:
+            logger.debug("Skipping file size check - not using JSON backend")
+            return
+
+        # Get thresholds from config
+        file_threshold_bytes = backend_config.file_size_warning_mb * 1024 * 1024
+        total_threshold_bytes = backend_config.total_size_warning_mb * 1024 * 1024
+
+        # Scan JSON files in database directory
+        db_path = Path(self.entry.path)
+        if not db_path.exists():
+            return
+
+        json_files = list(db_path.glob("*.json"))
+        total_size = 0
+        large_files = []
+
+        for json_file in json_files:
+            try:
+                file_size = json_file.stat().st_size
+                total_size += file_size
+
+                if file_size >= file_threshold_bytes:
+                    large_files.append((json_file.name, file_size))
+            except OSError as e:
+                logger.warning(f"Could not stat {json_file}: {e}")
+
+        # Warn about individual large files
+        for filename, size in large_files:
+            size_mb = size / (1024 * 1024)
+            logger.warning(
+                f"🚨 LARGE FILE: {filename} is {size_mb:.1f}MB "
+                f"(threshold: {backend_config.file_size_warning_mb}MB)"
+            )
+            logger.warning(
+                f"   Consider migrating to PostgreSQL: "
+                f"hybridrag backend migrate --from json --to postgres {self.db_name}"
+            )
+
+        # Warn about total size
+        if total_size >= total_threshold_bytes:
+            total_mb = total_size / (1024 * 1024)
+            logger.warning(
+                f"🚨 TOTAL SIZE: {len(json_files)} JSON files using {total_mb:.1f}MB "
+                f"(threshold: {backend_config.total_size_warning_mb}MB)"
+            )
+            logger.warning(
+                f"   Database '{self.db_name}' approaching memory limits. "
+                f"Consider migrating to PostgreSQL:"
+            )
+            logger.warning(
+                f"   hybridrag backend migrate --from json --to postgres {self.db_name}"
+            )
+
+            # Alert via alerting system for severe size issues
+            if total_size >= total_threshold_bytes * 1.5:  # 50% over threshold
+                self.alert_manager.alert_watcher_error(
+                    self.db_name,
+                    f"JSON storage at {total_mb:.0f}MB - risk of OOM crash",
+                    {
+                        "total_size_mb": round(total_mb, 1),
+                        "threshold_mb": backend_config.total_size_warning_mb,
+                        "file_count": len(json_files),
+                        "recommendation": "Migrate to PostgreSQL backend"
+                    }
+                )
 
     async def _ingest_changes(
         self,
@@ -398,6 +609,9 @@ class WatcherDaemon:
 
         total_files = len(all_changed)
         logger.info(f"Processing {total_files} changed file(s) in batches of {self.BATCH_SIZE}")
+
+        # T012: Track ingestion timing for performance monitoring
+        ingest_start_time = time.time()
 
         try:
             # Get or create the reusable core instance (lazy initialization)
@@ -472,6 +686,35 @@ class WatcherDaemon:
             logger.info(f"All batches complete: +{ingested_count} ingested, ~{skipped_count} duplicates skipped, x{error_count} errors")
             logger.info(f"Session totals: {self.stats['total_ingested']} ingested, {self.stats['duplicates_skipped']} skipped, {self.stats['errors']} errors")
 
+            # T012-T013: Record performance metrics and check for degradation
+            ingest_duration = time.time() - ingest_start_time
+            if ingested_count > 0 and self.performance_tracker:
+                degradation_warning = self.performance_tracker.record_ingestion(
+                    docs_count=ingested_count,
+                    duration_seconds=ingest_duration
+                )
+
+                # T013: Warn on performance degradation
+                if degradation_warning:
+                    logger.warning(
+                        f"🚨 PERFORMANCE DEGRADATION DETECTED: "
+                        f"Current rate {degradation_warning['current_rate']:.1f} docs/min "
+                        f"is {degradation_warning['degradation_pct']:.0f}% slower than "
+                        f"baseline {degradation_warning['baseline_rate']:.1f} docs/min"
+                    )
+                    logger.warning(
+                        f"   This may indicate JSON storage files are too large. "
+                        f"Consider migrating to PostgreSQL: "
+                        f"hybridrag backend migrate --from json --to postgres {self.db_name}"
+                    )
+
+                    # Alert via alerting system
+                    self.alert_manager.alert_watcher_error(
+                        self.db_name,
+                        f"Performance degraded by {degradation_warning['degradation_pct']:.0f}%",
+                        degradation_warning
+                    )
+
             # Create alert if there were errors in the batch
             if error_count > 0:
                 self.alert_manager.alert_ingestion_partial(
@@ -480,6 +723,10 @@ class WatcherDaemon:
                     failed=error_count,
                     details={"ingested": ingested_count, "skipped": skipped_count}
                 )
+
+            # Proactive monitoring: check JSON file sizes after each ingest cycle
+            # Warns users before OOM crashes if files are too large
+            self._check_json_file_sizes()
 
         except Exception as e:
             self.stats["errors"] += 1

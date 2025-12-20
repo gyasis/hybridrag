@@ -10,20 +10,18 @@ from textual.app import ComposeResult
 from textual.screen import Screen
 from textual.widgets import (
     Static, Button, Input, Select, Checkbox,
-    TextArea, Label, Footer, Header
+    TextArea, Label
 )
-from textual.containers import Container, Horizontal, Vertical, ScrollableContainer
+from textual.containers import Container, Horizontal, ScrollableContainer
 from textual.binding import Binding
 from textual.message import Message
 from textual.reactive import reactive
-from rich.panel import Panel
-from rich.text import Text
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
-from src.database_registry import DatabaseRegistry, get_registry
-from src.monitor.presets import PRESETS, PatternPreset, get_preset
+from src.database_registry import get_registry
+from src.monitor.presets import PRESETS, get_preset
 
 
 class WizardStep(Static):
@@ -70,7 +68,8 @@ class StepDatabaseName(WizardStep):
             error_widget.update("[red]Name is required[/red]")
             return False
 
-        if not all(c.isalnum() or c == '-' for c in name):
+        # BUG-001 fix: Check for lowercase explicitly (not just alphanumeric)
+        if not all(c.islower() or c.isdigit() or c == '-' for c in name):
             error_widget.update("[red]Only lowercase letters, numbers, and hyphens allowed[/red]")
             return False
 
@@ -302,6 +301,24 @@ class StepWatcher(WizardStep):
         yield Checkbox("Use default model", value=True, id="use_default_model")
         yield Input(placeholder="azure/gpt-4o", id="custom_model", disabled=True)
 
+        # BUG-009 fix: Add backend selection
+        yield Static("\n[bold]Storage Backend:[/bold]")
+        backend_options = [
+            ("JSON (File-based)", "json"),
+            ("PostgreSQL (pgvector)", "postgres"),
+        ]
+        yield Horizontal(
+            Label("Backend: "),
+            Select(backend_options, value="json", id="backend_select"),
+            classes="input-row"
+        )
+        yield Input(
+            placeholder="postgresql://user:pass@localhost:5432/hybridrag",
+            id="pg_connection",
+            disabled=True
+        )
+        yield Static("", id="backend_error", classes="error-text")
+
         yield Static("\n[bold]Description:[/bold]")
         yield Input(placeholder="Optional description for this database", id="description")
 
@@ -309,6 +326,11 @@ class StepWatcher(WizardStep):
         if event.checkbox.id == "use_default_model":
             model_input = self.query_one("#custom_model", Input)
             model_input.disabled = event.value
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "backend_select":
+            pg_input = self.query_one("#pg_connection", Input)
+            pg_input.disabled = event.value != "postgres"
 
     def is_valid(self) -> bool:
         interval_input = self.query_one("#interval", Input)
@@ -318,6 +340,22 @@ class StepWatcher(WizardStep):
                 return False
         except ValueError:
             return False
+
+        # Validate PostgreSQL connection string if selected
+        backend_select = self.query_one("#backend_select", Select)
+        error_widget = self.query_one("#backend_error", Static)
+
+        if backend_select.value == "postgres":
+            pg_input = self.query_one("#pg_connection", Input)
+            conn_str = pg_input.value.strip()
+            if not conn_str:
+                error_widget.update("[red]PostgreSQL connection string required[/red]")
+                return False
+            if not conn_str.startswith("postgresql://"):
+                error_widget.update("[red]Connection string must start with postgresql://[/red]")
+                return False
+            error_widget.update("")
+
         return True
 
     def get_values(self) -> dict:
@@ -327,11 +365,22 @@ class StepWatcher(WizardStep):
         model = None if use_default_model else self.query_one("#custom_model", Input).value.strip()
         description = self.query_one("#description", Input).value.strip()
 
+        # Backend configuration
+        backend_select = self.query_one("#backend_select", Select)
+        backend_type = str(backend_select.value)
+        backend_config = None
+
+        if backend_type == "postgres":
+            pg_input = self.query_one("#pg_connection", Input)
+            backend_config = {"connection_string": pg_input.value.strip()}
+
         return {
             "auto_watch": auto_watch,
             "watch_interval": interval,
             "model": model if model else None,
             "description": description if description else None,
+            "backend_type": backend_type,
+            "backend_config": backend_config,
         }
 
 
@@ -494,17 +543,42 @@ class WizardScreen(Screen):
                 default_dir = Path.home() / ".hybridrag" / "databases" / self._values["name"]
                 self._values["path"] = str(default_dir)
 
-            # Create database entry
+            # BUG-002 fix: Normalize paths consistently using Path.expanduser().resolve()
+            path = str(Path(self._values["path"]).expanduser().resolve())
+            source_folder = self._values.get("source_folder")
+            if source_folder:
+                source_folder = str(Path(source_folder).expanduser().resolve())
+
+            # BUG-004 fix: Extract file_extensions from include_patterns
+            file_extensions = None
+            include_patterns = self._values.get("include_patterns", [])
+            if include_patterns:
+                # Extract extensions from patterns like "**/*.md", "**/*.txt"
+                extensions = []
+                for pattern in include_patterns:
+                    if "*." in pattern:
+                        ext = pattern.split("*.")[-1]
+                        # Handle patterns like "*.{md,txt}" or clean extensions
+                        if ext and not any(c in ext for c in "{},/\\"):
+                            ext = "." + ext if not ext.startswith(".") else ext
+                            extensions.append(ext)
+                if extensions:
+                    file_extensions = extensions
+
+            # Create database entry (BUG-009 fix: include backend_type and backend_config)
             registry.register(
                 name=self._values["name"],
-                path=self._values["path"],
-                source_folder=self._values.get("source_folder"),
+                path=path,
+                source_folder=source_folder,
                 source_type=self._values.get("source_type", "filesystem"),
                 auto_watch=self._values.get("auto_watch", False),
                 watch_interval=self._values.get("watch_interval", 300),
                 model=self._values.get("model"),
                 recursive=self._values.get("recursive", True),
+                file_extensions=file_extensions,
                 description=self._values.get("description"),
+                backend_type=self._values.get("backend_type", "json"),
+                backend_config=self._values.get("backend_config"),
             )
 
             # Post success message and close

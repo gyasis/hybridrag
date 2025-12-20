@@ -16,7 +16,7 @@ import signal
 import subprocess
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum, auto
 
@@ -71,7 +71,43 @@ class WatchManager:
         manager.stop_watcher("specstory")
     """
 
-    # Base directory for HybridRAG
+    # BUG-013 fix: Use robust path resolution with validation
+    # Instead of fragile Path(__file__).parent.parent, we validate the path exists
+    @classmethod
+    def _get_hybridrag_dir(cls) -> Path:
+        """Get HybridRAG base directory with validation."""
+        # Try relative to this module first
+        candidate = Path(__file__).parent.parent
+        if (candidate / "scripts" / "hybridrag-watcher.py").exists():
+            return candidate
+
+        # Try from current working directory
+        cwd_candidate = Path.cwd()
+        if (cwd_candidate / "scripts" / "hybridrag-watcher.py").exists():
+            return cwd_candidate
+
+        # Try common installation paths
+        for path in [
+            Path.home() / "dev" / "tools" / "RAG" / "hybridrag",
+            Path.home() / ".local" / "share" / "hybridrag",
+        ]:
+            if (path / "scripts" / "hybridrag-watcher.py").exists():
+                return path
+
+        # Fall back to module-relative path (original behavior)
+        return candidate
+
+    @classmethod
+    def _get_scripts_dir(cls) -> Path:
+        """Get scripts directory."""
+        return cls._get_hybridrag_dir() / "scripts"
+
+    @classmethod
+    def _get_watcher_script(cls) -> Path:
+        """Get watcher script path."""
+        return cls._get_scripts_dir() / "hybridrag-watcher.py"
+
+    # Legacy class attributes for backward compatibility
     HYBRIDRAG_DIR = Path(__file__).parent.parent
     SCRIPTS_DIR = HYBRIDRAG_DIR / "scripts"
     WATCHER_SCRIPT = SCRIPTS_DIR / "hybridrag-watcher.py"
@@ -135,15 +171,20 @@ class WatchManager:
     def _start_standalone_watcher(self, entry: DatabaseEntry) -> Tuple[bool, str]:
         """Start a standalone Python watcher daemon."""
 
+        # BUG-013 fix: Use validated path methods instead of fragile class attributes
+        watcher_script = self._get_watcher_script()
+        scripts_dir = self._get_scripts_dir()
+        hybridrag_dir = self._get_hybridrag_dir()
+
         # Check if watcher script exists
-        if not self.WATCHER_SCRIPT.exists():
+        if not watcher_script.exists():
             # Fall back to legacy bash script for specstory
-            legacy_script = self.SCRIPTS_DIR / "watch_specstory_folders.sh"
+            legacy_script = scripts_dir / "watch_specstory_folders.sh"
             if legacy_script.exists() and entry.source_type == 'specstory':
                 return self._start_legacy_watcher(entry, legacy_script)
-            return False, f"Watcher script not found: {self.WATCHER_SCRIPT}"
+            return False, f"Watcher script not found: {watcher_script}"
 
-        log_dir = self.HYBRIDRAG_DIR / "logs"
+        log_dir = hybridrag_dir / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         log_file = log_dir / f"watcher_{entry.name}.log"
 
@@ -153,7 +194,7 @@ class WatchManager:
             # to prevent race conditions. We do NOT write the PID file here.
             with open(log_file, 'a') as log:
                 proc = subprocess.Popen(
-                    [sys.executable, str(self.WATCHER_SCRIPT), entry.name],
+                    [sys.executable, str(watcher_script), entry.name],
                     stdout=log,
                     stderr=log,
                     start_new_session=True
@@ -173,7 +214,8 @@ class WatchManager:
     ) -> Tuple[bool, str]:
         """Start the legacy bash watcher script."""
 
-        log_dir = self.HYBRIDRAG_DIR / "logs"
+        # BUG-013 fix: Use validated path methods
+        log_dir = self._get_hybridrag_dir() / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         log_file = log_dir / f"watcher_{entry.name}_legacy.log"
 
@@ -194,10 +236,9 @@ class WatchManager:
                     start_new_session=True
                 )
 
-            # Legacy script handles its own PID file, but we track it too
-            pid_file = get_watcher_pid_file(entry.name)
-            pid_file.parent.mkdir(parents=True, exist_ok=True)
-            pid_file.write_text(str(proc.pid))
+            # BUG-005 fix: DO NOT write PID file here - the legacy watcher script
+            # handles its own PID file creation with proper flock locking.
+            # Writing it here creates a race condition and potential double-writes.
 
             logger.info(f"Started legacy watcher for {entry.name} (PID: {proc.pid})")
             return True, f"Started legacy watcher (PID: {proc.pid})"
@@ -242,7 +283,8 @@ class WatchManager:
 
         # Generate unit file content
         venv_python = sys.executable
-        watcher_script = self.WATCHER_SCRIPT
+        # BUG-013 fix: Use validated path methods
+        watcher_script = self._get_watcher_script()
 
         unit_content = f"""[Unit]
 Description=HybridRAG Watcher for %i
@@ -364,7 +406,7 @@ WantedBy=default.target
                     mode = WatcherMode.SYSTEMD
                 else:
                     mode = WatcherMode.STANDALONE
-            except:
+            except (subprocess.SubprocessError, OSError):
                 mode = WatcherMode.STANDALONE
 
         return WatcherStatus(
@@ -470,7 +512,7 @@ WantedBy=default.target
                     ["systemctl", "--user", "disable", unit_name],
                     capture_output=True
                 )
-            except:
+            except (subprocess.SubprocessError, OSError):
                 pass
 
         # Remove template unit
@@ -484,7 +526,7 @@ WantedBy=default.target
                 ["systemctl", "--user", "daemon-reload"],
                 capture_output=True
             )
-        except:
+        except (subprocess.SubprocessError, OSError):
             pass
 
         return True, "Uninstalled systemd units"

@@ -589,6 +589,16 @@ class DataCollector:
         self._last_snapshot: Optional[MonitorSnapshot] = None
         self._log_cache: deque = deque(maxlen=500)
 
+    def reload(self) -> None:
+        """Reload registry from disk to pick up external changes.
+
+        BUG-011 fix: Provides a way to refresh the registry when
+        external processes may have modified the database configuration.
+        """
+        self.registry = get_registry()  # Get fresh instance from disk
+        self.watch_manager = WatchManager(self.registry)
+        self._last_snapshot = None  # Clear cached snapshot
+
     def refresh(self) -> MonitorSnapshot:
         """Collect fresh snapshot."""
         self._last_snapshot = collect_snapshot(self.registry)
@@ -631,7 +641,11 @@ class DataCollector:
             return False, f"Failed to update: {e}"
 
     def force_sync(self, db_name: str) -> Tuple[bool, str]:
-        """Force a sync/re-ingestion for a database."""
+        """Force a sync/re-ingestion for a database.
+
+        Triggers actual ingestion by starting the watcher process if not running,
+        or signaling a re-scan if the watcher is already active.
+        """
         entry = self.registry.get(db_name)
         if not entry:
             return False, f"Database not found: {db_name}"
@@ -639,9 +653,43 @@ class DataCollector:
         if not entry.source_folder:
             return False, "No source folder configured"
 
-        # This would trigger ingestion - for now just update timestamp
         try:
-            self.registry.update_last_sync(db_name)
-            return True, "Sync triggered (ingestion will run)"
+            # Check if watcher is running (use sync version from database_registry)
+            from ..database_registry import is_watcher_running
+
+            watcher_running, pid = is_watcher_running(db_name)
+
+            if watcher_running:
+                # Signal watcher to re-scan by touching a trigger file
+                from pathlib import Path
+                trigger_file = Path.home() / ".hybridrag" / "watcher_control" / f"{db_name}.rescan"
+                trigger_file.parent.mkdir(parents=True, exist_ok=True)
+                trigger_file.touch()
+                self.registry.update_last_sync(db_name)
+                return True, f"Re-scan triggered for running watcher (PID: {pid})"
+            else:
+                # Start a one-shot ingestion process
+                import subprocess
+                import sys
+
+                cmd = [
+                    sys.executable,
+                    "-m", "hybridrag",
+                    "ingest",
+                    db_name,
+                    "--source", entry.source_folder,
+                ]
+
+                # Run in background
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True
+                )
+
+                self.registry.update_last_sync(db_name)
+                return True, f"Ingestion started (PID: {proc.pid})"
+
         except Exception as e:
-            return False, f"Failed: {e}"
+            return False, f"Failed to trigger sync: {e}"
