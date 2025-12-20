@@ -154,59 +154,48 @@ def get_directory_size(path: Path) -> int:
 def parse_database_metadata(db_path: Path) -> Dict[str, int]:
     """Parse database metadata for entity/relation counts.
 
-    Uses fast methods first:
-    1. Parse log files for 'Loaded graph ... with X nodes, Y edges' (only if they reference this db_path)
-    2. Count keys in kv_store JSON files (fast dict length)
-    3. Read graphml file only as last resort (can be 100MB+)
+    Gets ACCURATE counts directly from GraphML file using fast grep.
+    Previous method used stale log entries which caused TUI to show outdated stats.
+
+    Methods:
+    1. Use subprocess grep to count <node> and <edge> tags in GraphML (fast even for 200MB+ files)
+    2. Fall back to Python read for small files if grep fails
+    3. Count chunks from kv_store_text_chunks.json
     """
+    import subprocess
     counts = {"entities": 0, "relations": 0, "chunks": 0}
-    db_path_str = str(db_path.resolve())
 
-    # Method 1: Try to find counts in recent log files (fastest)
-    # IMPORTANT: Only use log entries that explicitly reference this database's path
-    log_dir = Path(__file__).parent.parent.parent / "logs"
-    if log_dir.exists():
+    # Method 1: Count nodes/edges in GraphML using fast grep (works for any file size)
+    graphml_file = db_path / "graph_chunk_entity_relation.graphml"
+    if graphml_file.exists():
         try:
-            log_files = sorted(log_dir.glob("*.log"), key=lambda f: f.stat().st_mtime, reverse=True)
-            for log_file in log_files[:3]:  # Check 3 most recent logs
-                try:
-                    with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
+            # Use grep -c for fast counting (handles 200MB+ files in <1 second)
+            node_result = subprocess.run(
+                ['grep', '-c', '<node ', str(graphml_file)],
+                capture_output=True, text=True, timeout=10
+            )
+            if node_result.returncode == 0:
+                counts["entities"] = int(node_result.stdout.strip())
+
+            edge_result = subprocess.run(
+                ['grep', '-c', '<edge ', str(graphml_file)],
+                capture_output=True, text=True, timeout=10
+            )
+            if edge_result.returncode == 0:
+                counts["relations"] = int(edge_result.stdout.strip())
+        except (subprocess.TimeoutExpired, subprocess.SubprocessError, ValueError, FileNotFoundError):
+            # Fallback: Python read for small files only
+            try:
+                file_size = graphml_file.stat().st_size
+                if file_size < 50 * 1024 * 1024:  # 50MB limit for Python fallback
+                    with open(graphml_file, 'r', encoding='utf-8') as f:
                         content = f.read()
-                        # Verify this log file is for our specific database
-                        if db_path_str not in content and db_path.name not in content:
-                            continue
-                        # Look for: "Loaded graph ... with 44990 nodes, 80123 edges"
-                        match = re.search(r'Loaded graph.*?with\s+(\d+)\s+nodes?,\s*(\d+)\s+edges?', content)
-                        if match:
-                            counts["entities"] = int(match.group(1))
-                            counts["relations"] = int(match.group(2))
-                            break
-                except (IOError, OSError, ValueError):
-                    pass
-        except (IOError, OSError):
-            pass
-
-    # Method 2: Count keys in kv_store files (fast - just dict length)
-    if counts["entities"] == 0:
-        entities_file = db_path / "kv_store_full_entities.json"
-        if entities_file.exists():
-            try:
-                with open(entities_file, 'r') as f:
-                    data = json.load(f)
-                    counts["entities"] = len(data) if isinstance(data, dict) else len(data)
-            except (IOError, json.JSONDecodeError):
+                        counts["entities"] = content.count('<node ')
+                        counts["relations"] = content.count('<edge ')
+            except (IOError, OSError):
                 pass
 
-    if counts["relations"] == 0:
-        relations_file = db_path / "kv_store_full_relations.json"
-        if relations_file.exists():
-            try:
-                with open(relations_file, 'r') as f:
-                    data = json.load(f)
-                    counts["relations"] = len(data) if isinstance(data, dict) else len(data)
-            except (IOError, json.JSONDecodeError):
-                pass
-
+    # Method 2: Count chunks from kv_store_text_chunks.json
     if counts["chunks"] == 0:
         chunks_file = db_path / "kv_store_text_chunks.json"
         if chunks_file.exists():
@@ -215,21 +204,6 @@ def parse_database_metadata(db_path: Path) -> Dict[str, int]:
                     data = json.load(f)
                     counts["chunks"] = len(data) if isinstance(data, dict) else len(data)
             except (IOError, json.JSONDecodeError):
-                pass
-
-    # Method 3: Try graphml file ONLY if still no counts (slowest - avoid for large files)
-    if counts["entities"] == 0:
-        graphml_file = db_path / "graph_chunk_entity_relation.graphml"
-        if graphml_file.exists():
-            try:
-                # Only read graphml for small files (under 10MB)
-                file_size = graphml_file.stat().st_size
-                if file_size < 10 * 1024 * 1024:  # 10MB limit
-                    with open(graphml_file, 'r', encoding='utf-8') as f:
-                        content = f.read()
-                        counts["entities"] = content.count('<node ')
-                        counts["relations"] = content.count('<edge ')
-            except (IOError, OSError):
                 pass
 
     return counts
@@ -589,7 +563,13 @@ def get_recent_logs(
     lines: int = 50,
     log_dir: Optional[Path] = None
 ) -> List[LogEntry]:
-    """Get recent log entries."""
+    """Get recent log entries.
+
+    Uses grep to efficiently extract relevant entries from large log files
+    (watcher logs can be 100k+ lines with many LLM operation entries).
+    """
+    import subprocess
+
     if log_dir is None:
         log_dir = Path(__file__).parent.parent.parent / "logs"
 
@@ -619,33 +599,58 @@ def get_recent_logs(
     # Sort by modification time (newest first)
     log_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
 
-    # Read lines from most recent files
+    # Patterns for relevant log entries (ingestion/processing activity)
+    # Use grep to efficiently filter large log files
+    grep_patterns = [
+        r"\[OK\]",           # Successful ingestion
+        r"Ingested:",        # Ingestion messages
+        r"Processing batch", # Batch progress
+        r"Chunk \d+ of",     # Chunk progress
+        r"Complete",         # Completion messages
+        r"Started",          # Watcher start
+        r"Stopped",          # Watcher stop
+        r"ERROR",            # Errors
+        r"WARNING",          # Warnings
+    ]
+    combined_pattern = "|".join(grep_patterns)
+
     all_lines = []
     for log_file in log_files[:5]:  # Limit to 5 most recent files
         try:
-            with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
-                file_lines = f.readlines()[-100:]  # Last 100 lines per file
+            # Determine default database name from filename
+            if log_file.stem.startswith("watcher_"):
+                default_db = log_file.stem.replace("watcher_", "").split("_")[0]
+            else:
+                default_db = "system"
 
-                # Determine default database name
-                # First try: watcher_<dbname>.log format
-                if log_file.stem.startswith("watcher_"):
-                    default_db = log_file.stem.replace("watcher_", "").split("_")[0]
-                # Second try: Look for database path in log content
-                elif path_to_db:
-                    default_db = _extract_db_from_log_content(file_lines, path_to_db)
-                else:
-                    default_db = "system"
-
-                for line in file_lines:
-                    entry = parse_log_line(line, default_db)
-                    if entry:
-                        # Filter by db_name if specified
-                        if db_name is None or entry.database == db_name:
-                            all_lines.append(entry)
+            # Use grep to efficiently extract relevant lines from large log files
+            # Then take last N lines of the filtered output
+            try:
+                result = subprocess.run(
+                    ['grep', '-E', combined_pattern, str(log_file)],
+                    capture_output=True, text=True, timeout=5
+                )
+                if result.returncode == 0 and result.stdout:
+                    # Take last 200 relevant lines
+                    relevant_lines = result.stdout.strip().split('\n')[-200:]
+                    for line in relevant_lines:
+                        entry = parse_log_line(line, default_db)
+                        if entry:
+                            if db_name is None or entry.database == db_name:
+                                all_lines.append(entry)
+            except (subprocess.TimeoutExpired, subprocess.SubprocessError, FileNotFoundError):
+                # Fallback: read last 500 lines if grep fails
+                with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
+                    file_lines = f.readlines()[-500:]
+                    for line in file_lines:
+                        entry = parse_log_line(line, default_db)
+                        if entry:
+                            if db_name is None or entry.database == db_name:
+                                all_lines.append(entry)
         except (OSError, IOError):
             pass
 
-    # Sort by timestamp (oldest first so newest appear at bottom when displayed)
+    # Sort by timestamp (newest first)
     all_lines.sort(key=lambda e: e.timestamp, reverse=True)
     # Take newest entries, then reverse so oldest is first (newest at bottom)
     return list(reversed(all_lines[:lines]))
