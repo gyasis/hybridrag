@@ -11,6 +11,7 @@ import os
 import asyncio
 import logging
 import random
+import re
 from collections import OrderedDict
 from pathlib import Path
 from typing import Dict, List, Optional, Literal, Union, Any, Set, Type
@@ -36,11 +37,42 @@ logger = logging.getLogger(__name__)
 LITELLM_DEFAULT_TIMEOUT = 60
 
 # Retry configuration
-LITELLM_MAX_RETRIES = 3
-LITELLM_INITIAL_BACKOFF = 1.0  # seconds
-LITELLM_MAX_BACKOFF = 30.0  # seconds
+LITELLM_MAX_RETRIES = 4  # Increased for Azure rate limits
+LITELLM_INITIAL_BACKOFF = 2.0  # seconds (increased from 1.0)
+LITELLM_MAX_BACKOFF = 60.0  # seconds (increased from 30.0)
 LITELLM_BACKOFF_MULTIPLIER = 2.0
 LITELLM_JITTER_FACTOR = 0.25  # 25% jitter
+
+
+def extract_retry_after(exception: Exception) -> Optional[float]:
+    """
+    Extract 'retry after X seconds' from Azure/OpenAI rate limit errors.
+
+    Azure errors contain: "Please retry after 13 seconds"
+    OpenAI errors contain: "Retry-After: 20" header info
+
+    Returns:
+        Retry delay in seconds, or None if not found
+    """
+    error_str = str(exception)
+
+    # Pattern: "retry after X seconds" (Azure style)
+    match = re.search(r'retry after (\d+(?:\.\d+)?)\s*(?:second|sec|s)', error_str, re.IGNORECASE)
+    if match:
+        return float(match.group(1))
+
+    # Pattern: "Retry-After: X" (header style)
+    match = re.search(r'Retry-After[:\s]+(\d+(?:\.\d+)?)', error_str, re.IGNORECASE)
+    if match:
+        return float(match.group(1))
+
+    # Pattern: just "X seconds" after rate limit mention
+    if 'rate' in error_str.lower() and 'limit' in error_str.lower():
+        match = re.search(r'(\d+(?:\.\d+)?)\s*(?:second|sec|s)', error_str, re.IGNORECASE)
+        if match:
+            return float(match.group(1))
+
+    return None
 
 # HTTP status codes that are considered transient and should be retried
 TRANSIENT_HTTP_STATUS_CODES: Set[int] = {429, 500, 502, 503, 504}
@@ -182,12 +214,24 @@ async def retry_with_backoff(
                 )
                 raise
 
-            # Calculate backoff and wait
-            backoff = calculate_backoff_with_jitter(attempt)
-            logger.warning(
-                f"{operation_name} transient error (attempt {attempt + 1}/{max_retries + 1}): {e}. "
-                f"Retrying in {backoff:.2f}s..."
-            )
+            # Calculate backoff - respect server's retry-after if provided
+            calculated_backoff = calculate_backoff_with_jitter(attempt)
+            retry_after = extract_retry_after(e)
+
+            if retry_after is not None:
+                # Use server's retry-after value (with small buffer)
+                backoff = retry_after + 1.0
+                logger.warning(
+                    f"{operation_name} rate limited (attempt {attempt + 1}/{max_retries + 1}): {e}. "
+                    f"Server requested {retry_after}s wait. Retrying in {backoff:.1f}s..."
+                )
+            else:
+                backoff = calculated_backoff
+                logger.warning(
+                    f"{operation_name} transient error (attempt {attempt + 1}/{max_retries + 1}): {e}. "
+                    f"Retrying in {backoff:.2f}s..."
+                )
+
             await asyncio.sleep(backoff)
 
     # Should not reach here, but raise last exception if we do
