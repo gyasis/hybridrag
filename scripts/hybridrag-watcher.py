@@ -40,6 +40,7 @@ from src.database_registry import (
 )
 from src.alerting import get_alert_manager, AlertSeverity
 from src.config.config import BackendConfig, BackendType
+from src.database_metadata import DatabaseMetadata
 
 
 class PerformanceTracker:
@@ -750,6 +751,20 @@ class WatcherDaemon:
             # Log summary
             logger.info(f"All batches complete: +{ingested_count} ingested, ~{skipped_count} duplicates skipped, x{error_count} errors")
             logger.info(f"Session totals: {self.stats['total_ingested']} ingested, {self.stats['duplicates_skipped']} skipped, {self.stats['errors']} errors")
+
+            # Record ingestion to database_metadata.json for TUI monitor timeline
+            if ingested_count > 0:
+                try:
+                    db_metadata = DatabaseMetadata(self.entry.path)
+                    db_metadata.record_ingestion(
+                        folder_path=self.entry.source_folder,
+                        files_processed=ingested_count,
+                        success=(error_count == 0),
+                        notes=f"Watcher batch: +{ingested_count} ingested, ~{skipped_count} skipped, x{error_count} errors"
+                    )
+                    logger.debug(f"Recorded ingestion history: {ingested_count} files")
+                except Exception as e:
+                    logger.warning(f"Failed to record ingestion metadata: {e}")
 
             # T012-T013: Record performance metrics and check for degradation
             ingest_duration = time.time() - ingest_start_time

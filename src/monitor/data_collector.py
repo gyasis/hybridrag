@@ -600,7 +600,12 @@ class DataCollector:
         self._last_snapshot = None  # Clear cached snapshot
 
     def refresh(self) -> MonitorSnapshot:
-        """Collect fresh snapshot."""
+        """Collect fresh snapshot.
+
+        BUG-006 fix: Always reload registry from disk before collecting snapshot
+        to ensure we capture changes from external processes (watcher, CLI).
+        """
+        self.reload()  # Reload registry from disk first
         self._last_snapshot = collect_snapshot(self.registry)
         return self._last_snapshot
 

@@ -85,9 +85,9 @@ class HistoryPanel(Static, can_focus=True):
                 continue
 
             # Positive keywords indicating actual file processing
-            keywords = ["ingest", "processed", "added", "chunk", "success", "complete", "queued"]
+            keywords = ["ingest", "processed", "added", "chunk", "success", "complete", "queued", "extracted"]
             # More specific patterns that indicate actual file activity
-            specific_patterns = ["ingested", "✓", "✅", "files processed", "file processed"]
+            specific_patterns = ["ingested", "✓", "✅", "files processed", "file processed", "[OK]", "batch complete"]
 
             if not any(kw in msg_lower for kw in keywords) and not any(p in entry.message for p in specific_patterns):
                 continue
@@ -170,12 +170,14 @@ class HistoryPanel(Static, can_focus=True):
                                 continue
 
                             data = self._hourly_data[hours_ago]
-                            data["count"] += record.get("files_count", 1)
+                            data["count"] += record.get("files_processed", 1)
                             data["databases"].add(name)
 
                             if data["last_time"] is None or timestamp > data["last_time"]:
                                 data["last_time"] = timestamp
-                                data["last_file"] = record.get("last_file", "watcher activity")
+                                # Extract source folder name or use notes as fallback
+                                source = record.get("source_folder", "")
+                                data["last_file"] = Path(source).name if source else record.get("notes", "watcher activity")
                         except (ValueError, KeyError):
                             continue
 
