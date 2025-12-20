@@ -154,6 +154,8 @@ class HybridRAGCLI:
             await self.show_snapshot()
         elif command == 'backend':
             await self.run_backend_command()
+        elif command == 'logs':
+            await self.run_logs_command()
         else:
             print(f"❌ Unknown command: {command}")
             return 1
@@ -1649,20 +1651,17 @@ class HybridRAGCLI:
                 if entry.model:
                     cmd.append(entry.model)
 
-                # Create log file for watcher output
+                # Watcher manages its own logs with rotation (200MB max, 5 backups)
                 log_dir = Path(__file__).parent / "logs"
-                log_dir.mkdir(parents=True, exist_ok=True)
                 log_file = log_dir / f"watcher_{entry.name}.log"
-                log_handle = open(log_file, 'a')
 
                 proc = subprocess.Popen(
                     cmd,
-                    stdout=log_handle,
-                    stderr=log_handle,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
                     start_new_session=True
                 )
-                # Note: Keep log_handle open - child process inherits it
-                # The script handles its own PID file
+                # The watcher script handles its own logging and PID file
                 print(f"✅ Started watcher for {entry.name} (legacy mode)")
                 print(f"   Log: {log_file}")
                 return
@@ -1682,20 +1681,17 @@ class HybridRAGCLI:
             entry.name,
         ]
 
-        # Create log file for watcher output
+        # Watcher manages its own logs with rotation (200MB max, 5 backups)
         log_dir = Path(__file__).parent / "logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
         log_file = log_dir / f"watcher_{entry.name}.log"
-        log_handle = open(log_file, 'a')
 
         proc = subprocess.Popen(
             cmd,
-            stdout=log_handle,
-            stderr=log_handle,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             start_new_session=True
         )
 
-        # Note: Keep log_handle open - child process inherits it
         # Note: DO NOT write PID file here - the watcher script handles
         # its own PID file creation with proper flock locking to prevent
         # race conditions. See BUG-003 fix.
@@ -2683,6 +2679,156 @@ class HybridRAGCLI:
 
         return metrics
 
+    # ========================================
+    # Logs Management Commands
+    # ========================================
+
+    async def run_logs_command(self):
+        """Route logs management subcommands."""
+        logs_cmd = getattr(self.args, 'logs_command', None)
+
+        if not logs_cmd:
+            print("❌ No logs subcommand specified")
+            print("\nUsage: python hybridrag.py logs <command>")
+            print("\nCommands:")
+            print("  clean  - Clean old log files")
+            print("  show   - Show log file info")
+            return
+
+        if logs_cmd == 'clean':
+            await self.run_logs_clean()
+        elif logs_cmd == 'show':
+            await self.run_logs_show()
+        else:
+            print(f"❌ Unknown logs command: {logs_cmd}")
+
+    async def run_logs_clean(self):
+        """Clean old log files based on age or size."""
+        import time as time_module
+
+        log_dir = Path(__file__).parent / "logs"
+        if not log_dir.exists():
+            print("📁 No logs directory found")
+            return
+
+        days = getattr(self.args, 'days', 7)
+        max_size_mb = getattr(self.args, 'size', None)
+        dry_run = getattr(self.args, 'dry_run', False)
+        clean_all = getattr(self.args, 'all', False)
+
+        # Collect log files
+        log_files = list(log_dir.glob("*.log*"))
+        if not log_files:
+            print("📁 No log files found")
+            return
+
+        # Calculate current stats
+        total_size = sum(f.stat().st_size for f in log_files) / (1024 * 1024)
+        print(f"📊 Current logs: {len(log_files)} files, {total_size:.1f} MB")
+
+        # Determine files to delete
+        files_to_delete = []
+        cutoff = time_module.time() - (days * 24 * 60 * 60)
+
+        for log_file in log_files:
+            if clean_all:
+                files_to_delete.append(log_file)
+            elif log_file.stat().st_mtime < cutoff:
+                files_to_delete.append(log_file)
+
+        # If size threshold specified, also check that
+        if max_size_mb and total_size > max_size_mb:
+            # Sort by age, delete oldest first until under threshold
+            sorted_logs = sorted(log_files, key=lambda f: f.stat().st_mtime)
+            current_size = total_size
+            for log_file in sorted_logs:
+                if current_size <= max_size_mb:
+                    break
+                if log_file not in files_to_delete:
+                    files_to_delete.append(log_file)
+                    current_size -= log_file.stat().st_size / (1024 * 1024)
+
+        if not files_to_delete:
+            print(f"✅ No logs older than {days} days to clean")
+            return
+
+        # Show what will be deleted
+        delete_size = sum(f.stat().st_size for f in files_to_delete) / (1024 * 1024)
+        print(f"\n{'Would delete' if dry_run else 'Deleting'}: {len(files_to_delete)} files ({delete_size:.1f} MB)")
+
+        for f in files_to_delete[:10]:  # Show first 10
+            age_days = (time_module.time() - f.stat().st_mtime) / (24 * 60 * 60)
+            size_mb = f.stat().st_size / (1024 * 1024)
+            print(f"  {'🗑️ ' if not dry_run else '📋 '}{f.name} ({size_mb:.1f} MB, {age_days:.0f} days old)")
+
+        if len(files_to_delete) > 10:
+            print(f"  ... and {len(files_to_delete) - 10} more")
+
+        if dry_run:
+            print(f"\n💡 Run without --dry-run to delete these files")
+            return
+
+        # Delete files
+        deleted = 0
+        for f in files_to_delete:
+            try:
+                f.unlink()
+                deleted += 1
+            except Exception as e:
+                print(f"  ⚠️  Failed to delete {f.name}: {e}")
+
+        print(f"\n✅ Deleted {deleted} files, freed {delete_size:.1f} MB")
+
+    async def run_logs_show(self):
+        """Show log file information."""
+        log_dir = Path(__file__).parent / "logs"
+        if not log_dir.exists():
+            print("📁 No logs directory found")
+            return
+
+        db_name = getattr(self.args, 'name', None)
+        import time as time_module
+
+        # Collect log files
+        if db_name:
+            log_files = list(log_dir.glob(f"*{db_name}*.log*"))
+        else:
+            log_files = list(log_dir.glob("*.log*"))
+
+        if not log_files:
+            print("📁 No log files found")
+            return
+
+        # Sort by modification time (newest first)
+        log_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+
+        total_size = sum(f.stat().st_size for f in log_files) / (1024 * 1024)
+
+        print(f"📁 Log Directory: {log_dir}")
+        print(f"📊 Total: {len(log_files)} files, {total_size:.1f} MB")
+        print()
+        print(f"{'File':<45} {'Size':>10} {'Age':>10}")
+        print("-" * 67)
+
+        for f in log_files[:20]:  # Show first 20
+            age_days = (time_module.time() - f.stat().st_mtime) / (24 * 60 * 60)
+            size_mb = f.stat().st_size / (1024 * 1024)
+
+            if age_days < 1:
+                age_str = f"{age_days * 24:.0f}h"
+            else:
+                age_str = f"{age_days:.0f}d"
+
+            name = f.name[:42] + "..." if len(f.name) > 45 else f.name
+            print(f"{name:<45} {size_mb:>8.1f}MB {age_str:>10}")
+
+        if len(log_files) > 20:
+            print(f"... and {len(log_files) - 20} more files")
+
+        print()
+        print("💡 Clean old logs: python hybridrag.py logs clean --days 7")
+        print("💡 Auto-rotation: 200MB max per file, 5 backups, 7-day cleanup")
+
 
 def create_parser():
     """Create argument parser."""
@@ -2916,6 +3062,25 @@ Examples:
                                 help='Rollback to a previous backup')
     backend_migrate.add_argument('--list-backups', action='store_true',
                                 help='List available backups for the database')
+
+    # ===================== LOGS COMMAND =====================
+    logs_parser = subparsers.add_parser('logs', help='Manage log files')
+    logs_subparsers = logs_parser.add_subparsers(dest='logs_command', help='Logs command')
+
+    # logs clean
+    logs_clean = logs_subparsers.add_parser('clean', help='Clean old log files')
+    logs_clean.add_argument('--days', type=int, default=7,
+                           help='Remove logs older than N days (default: 7)')
+    logs_clean.add_argument('--size', type=float, default=None,
+                           help='Remove logs if total size exceeds N MB')
+    logs_clean.add_argument('--dry-run', action='store_true',
+                           help='Show what would be deleted without deleting')
+    logs_clean.add_argument('--all', action='store_true',
+                           help='Remove ALL log files (use with caution)')
+
+    # logs show
+    logs_show = logs_subparsers.add_parser('show', help='Show log file info')
+    logs_show.add_argument('name', nargs='?', help='Database name to show logs for')
 
     return parser
 

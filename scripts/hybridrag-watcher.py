@@ -179,11 +179,75 @@ class BoundedSet:
             self.add(item)
 
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# Configure logging with rotation
+from logging.handlers import RotatingFileHandler
+
+def setup_logging(db_name: str) -> logging.Logger:
+    """
+    Setup logging with size-based rotation.
+
+    - Max 200MB per file
+    - Keep 5 backup files (total ~1GB max per database)
+    - Also cleans up logs older than 7 days on startup
+    """
+    log_dir = Path(__file__).parent.parent / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / f"watcher_{db_name}.log"
+
+    # Clean old log backups (older than 7 days)
+    cleanup_old_logs(log_dir, days=7)
+
+    # Create logger
+    log = logging.getLogger(f"watcher.{db_name}")
+    log.setLevel(logging.INFO)
+
+    # Remove existing handlers to avoid duplicates
+    log.handlers.clear()
+
+    # Rotating file handler: 200MB max, keep 5 backups
+    file_handler = RotatingFileHandler(
+        log_file,
+        maxBytes=200 * 1024 * 1024,  # 200MB
+        backupCount=5,
+        encoding='utf-8'
+    )
+    file_handler.setFormatter(logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    ))
+    log.addHandler(file_handler)
+
+    # Also log to stderr for systemd/console
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(logging.Formatter(
+        '%(asctime)s - %(levelname)s - %(message)s'
+    ))
+    log.addHandler(console_handler)
+
+    return log
+
+
+def cleanup_old_logs(log_dir: Path, days: int = 7) -> int:
+    """
+    Remove log files older than specified days.
+
+    Returns count of files removed.
+    """
+    import time as time_module
+    cutoff = time_module.time() - (days * 24 * 60 * 60)
+    removed = 0
+
+    for log_file in log_dir.glob("*.log*"):
+        try:
+            if log_file.stat().st_mtime < cutoff:
+                log_file.unlink()
+                removed += 1
+        except Exception:
+            pass  # Skip files we can't delete
+
+    return removed
+
+
+# Default logger until setup_logging is called
 logger = logging.getLogger(__name__)
 
 
@@ -798,6 +862,8 @@ class WatcherDaemon:
 
 def main():
     """Main entry point."""
+    global logger
+
     if len(sys.argv) < 2:
         print("Usage: hybridrag-watcher.py <database_name>")
         print("\nThe database must be registered in the HybridRAG registry.")
@@ -805,16 +871,20 @@ def main():
 
     db_name = sys.argv[1]
 
+    # Setup logging with rotation (200MB max, 5 backups, 7-day cleanup)
+    logger = setup_logging(db_name)
+    logger.info(f"Starting watcher for database: {db_name}")
+
     try:
         daemon = WatcherDaemon(db_name)
         asyncio.run(daemon.run())
     except KeyboardInterrupt:
-        print("\nShutdown requested")
+        logger.info("Shutdown requested")
     except ValueError as e:
-        print(f"Error: {e}")
+        logger.error(f"Configuration error: {e}")
         sys.exit(1)
     except Exception as e:
-        print(f"Fatal error: {e}")
+        logger.exception(f"Fatal error: {e}")
         sys.exit(1)
 
 
