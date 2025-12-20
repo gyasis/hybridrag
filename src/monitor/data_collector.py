@@ -49,6 +49,13 @@ class DatabaseStats:
     entity_count: int = 0
     relation_count: int = 0
     chunk_count: int = 0
+    document_count: int = 0
+
+    # Processing info (from doc_status.json and logs)
+    processing_files: List[str] = field(default_factory=list)  # Files currently being processed
+    recent_files: List[Dict[str, Any]] = field(default_factory=list)  # Last 5 processed files
+    file_warnings: List[str] = field(default_factory=list)  # Size warnings for large files
+    processing_progress: Dict[str, Any] = field(default_factory=dict)  # {current_chunk, total_chunks, current_file}
 
     # Sync info
     last_sync: Optional[datetime] = None
@@ -264,6 +271,120 @@ def get_database_stats(entry: DatabaseEntry) -> DatabaseStats:
     if entry.source_folder and not Path(entry.source_folder).exists():
         errors.append(f"Source folder not found: {entry.source_folder}")
 
+    # Get document count, processing files, and recent files from doc_status.json
+    document_count = 0
+    processing_files = []
+    recent_files = []
+    doc_status_file = db_path / "doc_status.json"
+    if exists and doc_status_file.exists():
+        try:
+            with open(doc_status_file, 'r') as f:
+                doc_status = json.load(f)
+                # Count completed documents
+                completed = [k for k, v in doc_status.items() if v.get("status") == "processed"]
+                document_count = len(completed)
+                # Get processing files
+                processing_files = [k for k, v in doc_status.items() if v.get("status") == "processing"]
+                # Get recent files (last 5 processed, sorted by timestamp)
+                processed_items = []
+                for k, v in doc_status.items():
+                    if v.get("status") == "processed":
+                        ts_str = v.get("content_summary", {}).get("chunks_created_at") or v.get("status_updated")
+                        if ts_str:
+                            try:
+                                ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00").replace("+00:00", ""))
+                            except ValueError:
+                                ts = datetime.min
+                        else:
+                            ts = datetime.min
+                        processed_items.append({
+                            "name": Path(k).name,
+                            "path": k,
+                            "timestamp": ts,
+                            "chunks": v.get("content_summary", {}).get("num_chunks", 0)
+                        })
+                processed_items.sort(key=lambda x: x["timestamp"], reverse=True)
+                recent_files = processed_items[:5]
+        except (IOError, json.JSONDecodeError):
+            pass
+
+    # Check for file size warnings (>500MB threshold)
+    file_warnings = []
+    SIZE_THRESHOLD = 500 * 1024 * 1024  # 500MB
+    TOTAL_THRESHOLD = 2048 * 1024 * 1024  # 2GB
+    if exists:
+        for json_file in db_path.glob("*.json"):
+            try:
+                file_size = json_file.stat().st_size
+                if file_size > SIZE_THRESHOLD:
+                    file_warnings.append(f"{json_file.name}: {humanize_bytes(file_size)}")
+            except OSError:
+                pass
+        if size_bytes > TOTAL_THRESHOLD:
+            file_warnings.append(f"Total: {humanize_bytes(size_bytes)} (consider PostgreSQL)")
+
+    # Get processing progress from recent log entries
+    processing_progress = {}
+    log_file = Path("logs") / f"watcher_{entry.name}.log"
+    if log_file.exists():
+        try:
+            # Read last 100 lines of log for more context
+            with open(log_file, 'r') as f:
+                lines = f.readlines()[-100:]
+
+            # Patterns to match
+            chunk_pattern = re.compile(r'Chunk (\d+) of (\d+)')
+            batch_pattern = re.compile(r'Processing batch (\d+)/(\d+) \((\d+) files?\)')
+            file_pattern = re.compile(r'(?:Extracting|Merging) stage \d+/\d+: (.+)')
+            ingested_pattern = re.compile(r'\[OK\] Ingested: (.+)')
+
+            current_file = ""
+            current_batch = 0
+            total_batches = 0
+            batch_files = 0
+
+            for line in reversed(lines):
+                # Look for chunk progress (highest priority)
+                if not processing_progress.get("current_chunk"):
+                    match = chunk_pattern.search(line)
+                    if match:
+                        processing_progress["current_chunk"] = int(match.group(1))
+                        processing_progress["total_chunks"] = int(match.group(2))
+                        processing_progress["percent"] = int(100 * int(match.group(1)) / int(match.group(2)))
+
+                # Look for batch progress
+                if not current_batch:
+                    match = batch_pattern.search(line)
+                    if match:
+                        current_batch = int(match.group(1))
+                        total_batches = int(match.group(2))
+                        batch_files = int(match.group(3))
+
+                # Look for current file being processed
+                if not current_file:
+                    match = file_pattern.search(line)
+                    if match:
+                        current_file = Path(match.group(1)).name
+                    else:
+                        match = ingested_pattern.search(line)
+                        if match:
+                            current_file = match.group(1)
+
+                # Stop if we have all info
+                if processing_progress.get("current_chunk") and current_file and current_batch:
+                    break
+
+            # Add batch and file info to progress
+            if current_file:
+                processing_progress["current_file"] = current_file
+            if current_batch:
+                processing_progress["current_batch"] = current_batch
+                processing_progress["total_batches"] = total_batches
+                processing_progress["batch_files"] = batch_files
+
+        except (IOError, OSError):
+            pass
+
     return DatabaseStats(
         name=entry.name,
         path=entry.path,
@@ -276,6 +397,11 @@ def get_database_stats(entry: DatabaseEntry) -> DatabaseStats:
         entity_count=counts["entities"],
         relation_count=counts["relations"],
         chunk_count=counts["chunks"],
+        document_count=document_count,
+        processing_files=processing_files,
+        recent_files=recent_files,
+        file_warnings=file_warnings,
+        processing_progress=processing_progress,
         last_sync=last_sync,
         last_sync_human=humanize_timedelta(last_sync),
         watcher_running=running,
