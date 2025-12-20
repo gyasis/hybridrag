@@ -214,16 +214,25 @@ async def retry_with_backoff(
                 )
                 raise
 
-            # Calculate backoff - respect server's retry-after if provided
+            # Calculate backoff - respect server's retry-after AND compound on repeated failures
             calculated_backoff = calculate_backoff_with_jitter(attempt)
             retry_after = extract_retry_after(e)
 
             if retry_after is not None:
-                # Use server's retry-after value (with small buffer)
-                backoff = retry_after + 1.0
+                # Compound backoff: server's retry-after * (1 + 0.5 * attempt)
+                # Attempt 0: retry-after * 1.0 + buffer
+                # Attempt 1: retry-after * 1.5 + buffer
+                # Attempt 2: retry-after * 2.0 + buffer
+                # Attempt 3: retry-after * 2.5 + buffer
+                compound_multiplier = 1.0 + (0.5 * attempt)
+                base_wait = retry_after * compound_multiplier
+                # Use max of server wait or our exponential backoff
+                backoff = max(base_wait, calculated_backoff) + 1.0
+                # Cap at max backoff
+                backoff = min(backoff, LITELLM_MAX_BACKOFF)
                 logger.warning(
                     f"{operation_name} rate limited (attempt {attempt + 1}/{max_retries + 1}): {e}. "
-                    f"Server requested {retry_after}s wait. Retrying in {backoff:.1f}s..."
+                    f"Server requested {retry_after}s. Compounding to {backoff:.1f}s..."
                 )
             else:
                 backoff = calculated_backoff
