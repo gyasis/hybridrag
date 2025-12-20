@@ -1649,14 +1649,22 @@ class HybridRAGCLI:
                 if entry.model:
                     cmd.append(entry.model)
 
+                # Create log file for watcher output
+                log_dir = Path(__file__).parent / "logs"
+                log_dir.mkdir(parents=True, exist_ok=True)
+                log_file = log_dir / f"watcher_{entry.name}.log"
+                log_handle = open(log_file, 'a')
+
                 proc = subprocess.Popen(
                     cmd,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
+                    stdout=log_handle,
+                    stderr=log_handle,
                     start_new_session=True
                 )
+                # Note: Keep log_handle open - child process inherits it
                 # The script handles its own PID file
                 print(f"✅ Started watcher for {entry.name} (legacy mode)")
+                print(f"   Log: {log_file}")
                 return
 
             print("⚠️  Watcher script not found. Please create scripts/hybridrag-watcher.py")
@@ -1664,24 +1672,37 @@ class HybridRAGCLI:
             return
 
         # Run the Python watcher script
+        # Use the .venv Python if available, otherwise use current interpreter
+        venv_python = Path(__file__).parent / ".venv" / "bin" / "python"
+        python_exe = str(venv_python) if venv_python.exists() else sys.executable
+
         cmd = [
-            sys.executable,
+            python_exe,
             str(script_path),
             entry.name,
         ]
 
+        # Create log file for watcher output
+        log_dir = Path(__file__).parent / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / f"watcher_{entry.name}.log"
+        log_handle = open(log_file, 'a')
+
         proc = subprocess.Popen(
             cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=log_handle,
+            stderr=log_handle,
             start_new_session=True
         )
 
+        # Note: Keep log_handle open - child process inherits it
         # Note: DO NOT write PID file here - the watcher script handles
         # its own PID file creation with proper flock locking to prevent
         # race conditions. See BUG-003 fix.
 
         print(f"✅ Started watcher for {entry.name} (PID: {proc.pid})")
+        print(f"   Python: {python_exe}")
+        print(f"   Log: {log_file}")
 
     async def run_db_watch_stop(self):
         """Stop watcher for a database."""

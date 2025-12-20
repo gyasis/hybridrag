@@ -679,8 +679,9 @@ class WatcherDaemon:
                 gc.collect()
                 logger.debug(f"Batch {batch_num} complete, gc.collect() called")
 
-            # Update last_sync in registry
-            self.registry.update_last_sync(self.db_name)
+                # Update last_sync after each batch (not just at end)
+                # This ensures sync timestamp stays current even with continuous file changes
+                self.registry.update_last_sync(self.db_name)
 
             # Log summary
             logger.info(f"All batches complete: +{ingested_count} ingested, ~{skipped_count} duplicates skipped, x{error_count} errors")
