@@ -15,7 +15,6 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime, timedelta
-from collections import deque
 import re
 
 # Import from parent package
@@ -713,7 +712,6 @@ class DataCollector:
         self.registry = registry or get_registry()
         self.watch_manager = WatchManager(self.registry)
         self._last_snapshot: Optional[MonitorSnapshot] = None
-        self._log_cache: deque = deque(maxlen=500)
 
     def reload(self) -> None:
         """Reload registry from disk to pick up external changes.

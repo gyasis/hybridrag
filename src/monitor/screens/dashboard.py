@@ -355,20 +355,29 @@ class DashboardScreen(Screen):
             self._refreshing = False
 
     def _update_panels_for_database(self, db: DatabaseStats) -> None:
-        """Update all panels with selected database info."""
+        """Update all panels with selected database info.
+
+        BUG FIX: Force explicit updates instead of relying on reactive watchers.
+        Textual's reactive system uses equality comparison, so if DatabaseStats
+        fields are identical between refreshes, watchers won't fire. We now
+        explicitly call render/update methods to ensure panels always refresh.
+        """
         self.selected_database = db
 
-        # Update watcher panel
+        # Update watcher panel - force render to bypass reactive equality check
         watcher_panel = self.query_one("#watcher-panel", WatcherPanel)
         watcher_panel.database = db
+        watcher_panel.update(watcher_panel._render_watcher(db))
 
-        # Update source files panel
+        # Update source files panel - force file list refresh from filesystem
         source_files_panel = self.query_one("#source-files-panel", SourceFilesPanel)
         source_files_panel.database = db
+        source_files_panel.refresh_files()
 
-        # Update action panel
+        # Update action panel - force render to bypass reactive equality check
         action_panel = self.query_one("#action-panel", ActionPanel)
         action_panel.database = db
+        action_panel.update(action_panel._render_actions(db))
 
     def on_database_table_database_selected(self, event: DatabaseTable.DatabaseSelected) -> None:
         """Handle database selection."""
