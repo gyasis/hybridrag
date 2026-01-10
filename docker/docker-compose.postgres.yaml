@@ -1,0 +1,93 @@
+# HybridRAG PostgreSQL Backend with pgvector
+# ==========================================
+# Auto-provision PostgreSQL with pgvector extension for HybridRAG storage.
+#
+# Usage:
+#   docker-compose -f docker-compose.postgres.yaml up -d
+#
+# Or use the CLI command:
+#   hybridrag backend setup-docker
+#
+# Environment Variables:
+#   POSTGRES_PASSWORD - Database password (default: hybridrag_default)
+#   POSTGRES_PORT     - Host port mapping (default: 5432)
+#   POSTGRES_DATA_DIR - Host path for data volume (default: Docker volume)
+
+version: '3.8'
+
+services:
+  hybridrag-postgres:
+    image: pgvector/pgvector:pg16
+    container_name: hybridrag-postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_USER: hybridrag
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hybridrag_default}
+      POSTGRES_DB: hybridrag
+      # Optimization for RAG workloads
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=en_US.UTF-8"
+
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+
+    volumes:
+      # Persistent data volume
+      - hybridrag-pgdata:/var/lib/postgresql/data
+      # Optional: Mount initialization scripts
+      - ./init-scripts:/docker-entrypoint-initdb.d:ro
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hybridrag -d hybridrag"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+    # Memory limits for stability
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # PostgreSQL server configuration
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_buffers=256MB"
+      - "-c"
+      - "effective_cache_size=768MB"
+      - "-c"
+      - "maintenance_work_mem=128MB"
+      - "-c"
+      - "work_mem=16MB"
+      - "-c"
+      - "max_connections=100"
+      - "-c"
+      - "wal_level=replica"
+      - "-c"
+      - "max_wal_size=1GB"
+      - "-c"
+      - "min_wal_size=80MB"
+
+volumes:
+  hybridrag-pgdata:
+    driver: local
+    # Optional: Use specific host path
+    # driver_opts:
+    #   type: none
+    #   o: bind
+    #   device: ${POSTGRES_DATA_DIR:-/var/lib/hybridrag/postgres}
+
+networks:
+  default:
+    name: hybridrag-network

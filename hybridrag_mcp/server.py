@@ -24,6 +24,10 @@ import os
 import sys
 import asyncio
 import logging
+import tempfile
+import atexit
+import shutil
+from datetime import datetime
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -34,12 +38,49 @@ from fastmcp import FastMCP
 from src.lightrag_core import HybridLightRAGCore
 from config.config import HybridRAGConfig
 
-# Configure logging
+# Create temp log directory (cleaned up on restart/exit)
+TEMP_LOG_DIR = Path(tempfile.gettempdir()) / "hybridrag_mcp_logs"
+if TEMP_LOG_DIR.exists():
+    shutil.rmtree(TEMP_LOG_DIR)  # Clean up from previous runs
+TEMP_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+# Cleanup on exit
+def cleanup_temp_logs():
+    if TEMP_LOG_DIR.exists():
+        shutil.rmtree(TEMP_LOG_DIR, ignore_errors=True)
+
+atexit.register(cleanup_temp_logs)
+
+# Configure logging with both console and temp file output
+LOG_FILE = TEMP_LOG_DIR / f"hybridrag_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),  # Console output
+        logging.FileHandler(LOG_FILE)  # Temp file output
+    ]
 )
 logger = logging.getLogger(__name__)
+
+# Enable LiteLLM logging to temp directory for PromptChain debugging
+LITELLM_LOG_FILE = TEMP_LOG_DIR / f"litellm_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+try:
+    import litellm
+    litellm.set_verbose = True  # Enable verbose mode
+    # Set up LiteLLM file logging
+    litellm_logger = logging.getLogger("LiteLLM")
+    litellm_logger.setLevel(logging.DEBUG)
+    litellm_handler = logging.FileHandler(LITELLM_LOG_FILE)
+    litellm_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+    litellm_logger.addHandler(litellm_handler)
+    logger.info(f"LiteLLM log file: {LITELLM_LOG_FILE}")
+except ImportError:
+    logger.warning("LiteLLM not available for logging")
+
+logger.info(f"Temp log directory: {TEMP_LOG_DIR}")
+logger.info(f"Log file: {LOG_FILE}")
 
 # Get database path from environment
 DATABASE_PATH = os.environ.get("HYBRIDRAG_DATABASE")
@@ -301,7 +342,7 @@ async def hybridrag_hybrid_query(
         return f"Error executing hybrid query: {str(e)}"
 
 
-@mcp.tool
+@mcp.tool(task=True)
 async def hybridrag_multihop_query(
     query: str,
     max_steps: int = 8,
@@ -309,6 +350,9 @@ async def hybridrag_multihop_query(
 ) -> str:
     """
     Execute MULTI-STEP agentic reasoning for COMPLEX analytical queries.
+
+    **RUNS AS BACKGROUND TASK** - Returns immediately with a task ID.
+    Use the task ID to poll for results. This prevents timeout issues for long queries.
 
     USE THIS for questions that CANNOT be answered in a single retrieval:
     - Comparative analysis: "Compare X with Y", "What's the difference between A and B?"
@@ -334,43 +378,61 @@ async def hybridrag_multihop_query(
         Synthesized answer from multi-hop reasoning with execution metadata
     """
     try:
+        logger.info("=== MULTIHOP QUERY START ===")
+        logger.info(f"Query: {query[:200]}...")
+        logger.info(f"Max steps: {max_steps}, Verbose: {verbose}")
+        logger.info(f"Log file: {LOG_FILE}")
+
         core = await get_lightrag_core()
+        logger.info("LightRAG core initialized")
 
         # Import agentic RAG module
         try:
             from src.agentic_rag import create_agentic_rag
+            logger.info("Agentic RAG module imported successfully")
         except ImportError as e:
+            logger.error(f"Failed to import agentic_rag: {e}")
             return f"Error: Multi-hop reasoning requires PromptChain. Install with: pip install git+https://github.com/gyasis/PromptChain.git\n\nImport error: {e}"
 
         # Create agentic RAG instance
         model_name = MODEL_OVERRIDE or "azure/gpt-4o"
+        logger.info(f"Creating agentic RAG with model: {model_name}")
         agentic = create_agentic_rag(
             lightrag_core=core,
             model_name=model_name,
             max_internal_steps=max_steps,
             verbose=verbose
         )
+        logger.info("Agentic RAG instance created")
 
-        # Execute multi-hop reasoning with shield to protect from client cancellation
-        # This prevents the MCP client timeout from cancelling the long-running operation
+        # Execute multi-hop reasoning (task=True handles timeout, no need for shield)
+        logger.info("Starting multi-hop reasoning execution...")
+        start_time = datetime.now()
+
         try:
-            result = await asyncio.shield(
-                agentic.execute_multi_hop_reasoning(
-                    query=query,
-                    timeout_seconds=600.0
-                )
+            result = await agentic.execute_multi_hop_reasoning(
+                query=query,
+                timeout_seconds=600.0
             )
+            elapsed = (datetime.now() - start_time).total_seconds()
+            logger.info(f"Multi-hop reasoning completed in {elapsed:.2f}s")
         except asyncio.CancelledError:
-            logger.warning("Multi-hop query cancelled by client - this is expected for long queries")
+            elapsed = (datetime.now() - start_time).total_seconds()
+            logger.warning(f"Multi-hop query cancelled after {elapsed:.2f}s")
             return "Query was cancelled. Multi-hop reasoning takes time (2-10 minutes). Please try again or use a simpler query mode (hybrid, local, global) for faster results."
 
         # Format response - agentic_rag returns 'result' key, not 'answer'
         response = result.get('result') or result.get('answer', 'No answer generated')
+        logger.info(f"Response generated, length: {len(response)} chars")
 
         if verbose and 'reasoning_trace' in result:
             response += f"\n\n---\n**Reasoning Trace:**\n{result['reasoning_trace']}"
 
         response += f"\n\n---\n_Mode: multihop | Steps: {result.get('steps_taken', 'unknown')} | Time: {result.get('execution_time', 0):.2f}s_"
+
+        logger.info("=== MULTIHOP QUERY COMPLETE ===")
+        logger.info(f"Steps taken: {result.get('steps_taken', 'unknown')}")
+        logger.info(f"Execution time: {result.get('execution_time', 0):.2f}s")
 
         return response
 
@@ -378,7 +440,7 @@ async def hybridrag_multihop_query(
         logger.warning("Multi-hop query cancelled during setup")
         return "Query was cancelled during initialization. Multi-hop reasoning requires more time. Try using hybrid mode for faster results."
     except Exception as e:
-        logger.error(f"Multi-hop query error: {e}")
+        logger.error(f"Multi-hop query error: {e}", exc_info=True)
         return f"Error executing multi-hop query: {str(e)}"
 
 
@@ -474,6 +536,39 @@ async def hybridrag_database_status() -> str:
 
 
 @mcp.tool
+async def hybridrag_get_logs(lines: int = 50) -> str:
+    """
+    Get recent log entries from the HybridRAG MCP server.
+
+    USE THIS to:
+    - Debug query issues
+    - Monitor multihop query progress
+    - Check for errors
+
+    Logs are stored in a temp directory and cleaned up on server restart.
+
+    Args:
+        lines: Number of recent log lines to return (default: 50)
+
+    Returns:
+        Recent log entries with log file location
+    """
+    try:
+        if not LOG_FILE.exists():
+            return f"Log file not found: {LOG_FILE}"
+
+        with open(LOG_FILE, 'r') as f:
+            all_lines = f.readlines()
+            recent = all_lines[-lines:] if len(all_lines) > lines else all_lines
+
+        return f"**Log file:** `{LOG_FILE}`\n**Temp dir:** `{TEMP_LOG_DIR}`\n\n---\n```\n{''.join(recent)}```"
+
+    except Exception as e:
+        logger.error(f"Error reading logs: {e}")
+        return f"Error reading logs: {str(e)}"
+
+
+@mcp.tool
 async def hybridrag_health_check() -> str:
     """
     Perform a health check to verify the HybridRAG system is working.
@@ -525,12 +620,15 @@ async def hybridrag_health_check() -> str:
 
 def main():
     """Run the MCP server."""
-    logger.info(f"Starting HybridRAG MCP Server")
+    logger.info("Starting HybridRAG MCP Server")
     logger.info(f"Database: {DATABASE_PATH}")
+    logger.info(f"Temp log directory: {TEMP_LOG_DIR}")
+    logger.info(f"Log file: {LOG_FILE}")
     if MODEL_OVERRIDE:
         logger.info(f"Model override: {MODEL_OVERRIDE}")
     if EMBED_MODEL_OVERRIDE:
         logger.info(f"Embedding model override: {EMBED_MODEL_OVERRIDE}")
+    logger.info("Multihop queries run as background tasks (task=True)")
 
     # Run the MCP server (stdio transport)
     mcp.run()

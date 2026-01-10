@@ -1,0 +1,59 @@
+ere's the complete list of LightRAG's built-in storage backends:                                                                            
+                                                                                                                                               
+  Storage Types & Supported Backends                                                                                                           
+                                                                                                                                               
+  1. KV Storage (Key-Value) - BaseKVStorage                                                                                                    
+                                                                                                                                               
+  | Class          | Backend              | File             |                                                                                 
+  |----------------|----------------------|------------------|                                                                                 
+  | JsonKVStorage  | JSON files (default) | json_kv_impl.py  |                                                                                 
+  | PGKVStorage    | PostgreSQL           | postgres_impl.py |                                                                                 
+  | MongoKVStorage | MongoDB              | mongo_impl.py    |                                                                                 
+  | RedisKVStorage | Redis                | redis_impl.py    |                                                                                 
+                                                                                                                                               
+  2. Vector Storage - BaseVectorStorage                                                                                                        
+                                                                                                                                               
+  | Class                 | Backend                | File                   |                                                                  
+  |-----------------------|------------------------|------------------------|                                                                  
+  | NanoVectorDBStorage   | NanoVectorDB (default) | nano_vector_db_impl.py |                                                                  
+  | PGVectorStorage       | PostgreSQL + pgvector  | postgres_impl.py       |                                                                  
+  | MongoVectorDBStorage  | MongoDB                | mongo_impl.py          |                                                                  
+  | FaissVectorDBStorage  | FAISS                  | faiss_impl.py          |                                                                  
+  | MilvusVectorDBStorage | Milvus                 | milvus_impl.py         |                                                                  
+  | QdrantVectorDBStorage | Qdrant                 | qdrant_impl.py         |                                                                  
+                                                                                                                                               
+  3. Graph Storage - BaseGraphStorage                                                                                                          
+                                                                                                                                               
+  | Class             | Backend                 | File             |                                                                           
+  |-------------------|-------------------------|------------------|                                                                           
+  | NetworkXStorage   | NetworkX (default)      | networkx_impl.py |                                                                           
+  | PGGraphStorage    | PostgreSQL + Apache AGE | postgres_impl.py |                                                                           
+  | MongoGraphStorage | MongoDB                 | mongo_impl.py    |                                                                           
+  | Neo4JStorage      | Neo4j                   | neo4j_impl.py    |                                                                           
+  | MemgraphStorage   | Memgraph                | memgraph_impl.py |                                                                           
+                                                                                                                                               
+  4. Doc Status Storage - DocStatusStorage                                                                                                     
+                                                                                                                                               
+  | Class                 | Backend              | File                    |                                                                   
+  |-----------------------|----------------------|-------------------------|                                                                   
+  | JsonDocStatusStorage  | JSON files (default) | json_doc_status_impl.py |                                                                   
+  | PGDocStatusStorage    | PostgreSQL           | postgres_impl.py        |                                                                   
+  | MongoDocStatusStorage | MongoDB              | mongo_impl.py           |                                                                   
+  | RedisDocStatusStorage | Redis                | redis_impl.py           |                                                                   
+                                                                                                                                               
+  ---                                                                                                                                          
+  Summary: Full Backend Support Matrix                                                                                                         
+                                                                                                                                               
+  | Backend    | KV  | Vector | Graph | DocStatus |                                                                                            
+  |------------|-----|--------|-------|-----------|                                                                                            
+  | JSON/File  | ✅  |   ✅   |  ✅   |    ✅     |                                                                                            
+  | PostgreSQL | ✅  |   ✅   |  ✅   |    ✅     |                                                                                            
+  | MongoDB    | ✅  |   ✅   |  ✅   |    ✅     |                                                                                            
+  | Redis      | ✅  |   ❌   |  ❌   |    ✅     |                                                                                            
+  | Neo4j      | ❌  |   ❌   |  ✅   |    ❌     |                                                                                            
+  | Memgraph   | ❌  |   ❌   |  ✅   |    ❌     |                                                                                            
+  | Milvus     | ❌  |   ✅   |  ❌   |    ❌     |                                                                                            
+  | Qdrant     | ❌  |   ✅   |  ❌   |    ❌     |                                                                                            
+  | FAISS      | ❌  |   ✅   |  ❌   |    ❌     |                                                                                            
+                                                                                                                                               
+  PostgreSQL and MongoDB have FULL coverage - all 4 storage types. This means we can use them as complete drop-in replacements for JSON without mixing backends.
