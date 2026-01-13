@@ -4,6 +4,97 @@
 
 ---
 
+## 🎯 Two Ingestion Scripts
+
+| Script | Use Case |
+|--------|----------|
+| `ingest_specstory_folders.sh` | **SpecStory ONLY** - auto-finds `.specstory` folders |
+| `ingest_recursive.sh` | **Generic** - any folder patterns, file types, file names |
+
+---
+
+## 📁 SpecStory Workflow (Recommended)
+
+Point to your **top-level dev folder** and let the script recursively find all `.specstory` folders:
+
+```bash
+# Your folder structure:
+# /home/user/dev/
+# ├── project-alpha/.specstory/history/*.md
+# ├── project-beta/.specstory/history/*.md
+# ├── jira-issues/
+# │   ├── TIC-123/.specstory/history/*.md
+# │   └── TIC-456/.specstory/history/*.md
+# └── research/.specstory/history/*.md
+
+# One command finds ALL .specstory folders recursively:
+./scripts/ingest_specstory_folders.sh /home/user/dev fresh
+```
+
+**What happens:**
+1. Recursively searches `/home/user/dev` for ALL `.specstory` folders
+2. Auto-tags each with `project=<folder-name>` metadata
+3. Ingests all files from each `.specstory` folder
+4. Creates unified searchable knowledge base
+
+---
+
+## 🔧 Generic Recursive Workflow
+
+For more control over what gets ingested:
+
+```bash
+# Find specific folder patterns
+./scripts/ingest_recursive.sh /home/user/dev fresh \
+    --folders ".specstory,docs,.memory"
+
+# Find only .md files (anywhere)
+./scripts/ingest_recursive.sh /home/user/dev fresh \
+    --files "*.md"
+
+# Find .md files ONLY in .specstory/history folders
+./scripts/ingest_recursive.sh /home/user/dev fresh \
+    --folders "history" \
+    --exclude "node_modules,.git,.venv"
+
+# Combine: specific folders + file types + custom tag
+./scripts/ingest_recursive.sh /home/user/dev fresh \
+    --folders ".specstory" \
+    --files "*.md" \
+    --tag "conversation-history"
+```
+
+---
+
+## 🔄 Multi-Location Database Building
+
+### Add folders from different locations:
+```bash
+# First location - creates NEW database
+./scripts/ingest_specstory_folders.sh /home/user/dev fresh
+
+# Second location - ADDS to same database
+./scripts/ingest_specstory_folders.sh /home/user/work add
+
+# Third location - ADDS more
+./scripts/ingest_recursive.sh /mnt/external/projects add \
+    --folders ".specstory,docs" \
+    --tag "external"
+```
+
+### Add another folder weeks later:
+```bash
+# Always use 'add' to preserve existing data
+./scripts/ingest_specstory_folders.sh /home/user/new-project add
+```
+
+| Action | What It Does |
+|--------|--------------|
+| `fresh` | **Wipes database**, starts new |
+| `add` | **Appends** to existing database |
+
+---
+
 ## ⚡ 30-Minute Setup
 
 ### 1. Clone HybridRAG (2 min)
