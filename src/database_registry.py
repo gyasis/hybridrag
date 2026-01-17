@@ -182,9 +182,11 @@ class DatabaseEntry:
         backend_type_enum = BackendType.from_string(self.backend_type)
         if self.backend_config is None:
             return BackendConfig(backend_type=backend_type_enum)
+        # Remove backend_type from dict to avoid duplicate keyword argument
+        config_dict = {k: v for k, v in self.backend_config.items() if k != 'backend_type'}
         return BackendConfig(
             backend_type=backend_type_enum,
-            **self.backend_config
+            **config_dict
         )
 
     def to_dict(self) -> Dict[str, Any]:

@@ -24,15 +24,16 @@ Author: HybridRAG System
 Date: 2025-11-10
 """
 
-import asyncio
 import argparse
-import logging
-import sys
-import os
+import asyncio
 import json
+import logging
+import os
 import shutil
+import sys
 from pathlib import Path
-from typing import Optional, List
+from typing import List, Optional
+
 from dotenv import load_dotenv
 
 # Add src to path
@@ -42,15 +43,18 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 load_dotenv()
 
 # Import metadata manager
+# Import backend configuration for status command
+from src.config.config import BackendConfig
 from src.database_metadata import DatabaseMetadata, list_all_databases
 
 # Import database registry
 from src.database_registry import (
-    DatabaseEntry, get_registry, resolve_database, get_watcher_pid_file, is_watcher_running
+    DatabaseEntry,
+    get_registry,
+    get_watcher_pid_file,
+    is_watcher_running,
+    resolve_database,
 )
-
-# Import backend configuration for status command
-from src.config.config import BackendConfig
 
 # Configure logging
 logging.basicConfig(
@@ -190,8 +194,8 @@ class HybridRAGCLI:
 
     async def run_interactive(self):
         """Run interactive query interface with retrieval."""
-        from src.lightrag_core import HybridLightRAGCore
         from config.config import HybridRAGConfig
+        from src.lightrag_core import HybridLightRAGCore
 
         print("\n" + "="*70)
         print("🔍 HybridRAG Interactive Query Interface")
@@ -375,8 +379,8 @@ class HybridRAGCLI:
 
     async def _query_with_lightrag(self, query_text: str, mode: str, agentic: bool):
         """Execute query using LightRAG with LiteLLM integration."""
-        from src.lightrag_core import HybridLightRAGCore
         from config.config import HybridRAGConfig
+        from src.lightrag_core import HybridLightRAGCore
 
         # Initialize config with CLI overrides
         config = HybridRAGConfig()
@@ -402,8 +406,8 @@ class HybridRAGCLI:
 
     async def _query_with_multihop(self, query_text: str, verbose: bool = False):
         """Execute query using multi-hop reasoning with LightRAG tools."""
-        from src.lightrag_core import HybridLightRAGCore
         from config.config import HybridRAGConfig
+        from src.lightrag_core import HybridLightRAGCore
 
         print("🧠 Using multi-hop reasoning with LightRAG tools...")
 
@@ -470,9 +474,9 @@ class HybridRAGCLI:
         print("🧠 Using PromptChain for advanced multi-hop reasoning...")
 
         # Import PromptChain components
-        from query_with_promptchain import SpecStoryRAG
-        from promptchain.utils.promptchaining import PromptChain
         from promptchain.utils.agentic_step_processor import AgenticStepProcessor
+        from promptchain.utils.promptchaining import PromptChain
+        from query_with_promptchain import SpecStoryRAG
 
         # Initialize RAG
         spec_rag = SpecStoryRAG(working_dir=self.working_dir)
@@ -687,9 +691,9 @@ class HybridRAGCLI:
     async def _ingest_single_process(self, folders: List[str], recursive: bool, quiet_mode: bool = False):
         """Run ingestion in single process (batch mode - process once and exit)."""
         from config.config import load_config
+        from src.folder_watcher import FolderWatcher
         from src.ingestion_pipeline import IngestionPipeline
         from src.lightrag_core import create_lightrag_core
-        from src.folder_watcher import FolderWatcher
 
         config = load_config(self.config_path)
         config.ingestion.watch_folders = folders
@@ -935,8 +939,9 @@ class HybridRAGCLI:
 
     async def show_snapshot(self):
         """Quick status snapshot for monitoring: watchers, folders, files processed."""
-        from src.utils import format_file_size
         from datetime import datetime
+
+        from src.utils import format_file_size
 
         print("\n" + "="*60)
         print("  HYBRIDRAG SNAPSHOT  " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
@@ -2031,10 +2036,16 @@ class HybridRAGCLI:
         - Staged migration with backup (Phase 7)
         """
         from pathlib import Path
-        from src.database_registry import get_registry
-        from src.migration import MigrationJob, MigrationVerifier, MigrationCheckpoint
-        from src.migration import DatabaseBackup, StagedMigration
+
         from src.config.config import BackendConfig
+        from src.database_registry import get_registry
+        from src.migration import (
+            DatabaseBackup,
+            MigrationCheckpoint,
+            MigrationJob,
+            MigrationVerifier,
+            StagedMigration,
+        )
 
         # Get arguments
         db_name = getattr(self.args, 'name', None)
