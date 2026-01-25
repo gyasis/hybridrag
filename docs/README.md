@@ -45,7 +45,7 @@ Setup instructions and usage documentation:
 
 ## Additional Documentation
 
-- **Memory Bank** (../memory-bank/) - Project history and context
+- **Memory Bank** (../context-knight/memory-bank/) - Project history and context
   - projectbrief.md - Project overview
   - progress.md - Progress tracking
   - activeContext.md - Current session status

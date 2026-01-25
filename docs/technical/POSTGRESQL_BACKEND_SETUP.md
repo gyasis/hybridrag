@@ -80,6 +80,108 @@ ERROR: function create_graph(unknown) does not exist
 ERROR: type "vector" does not exist
 ```
 
+### 🚨 LightRAG Table Names are HARDCODED (CRITICAL!)
+
+**LightRAG's PostgreSQL backend uses hardcoded table names that CANNOT be changed.**
+
+The table names are defined in `lightrag/kg/postgres_impl.py` at `NAMESPACE_TABLE_MAP`:
+
+| LightRAG Namespace | Hardcoded Table Name |
+|--------------------|----------------------|
+| `KV_STORE_FULL_DOCS` | `LIGHTRAG_DOC_FULL` |
+| `KV_STORE_TEXT_CHUNKS` | `LIGHTRAG_DOC_CHUNKS` |
+| `KV_STORE_FULL_ENTITIES` | `LIGHTRAG_FULL_ENTITIES` |
+| `KV_STORE_FULL_RELATIONS` | `LIGHTRAG_FULL_RELATIONS` |
+| `KV_STORE_ENTITY_CHUNKS` | `LIGHTRAG_ENTITY_CHUNKS` |
+| `KV_STORE_RELATION_CHUNKS` | `LIGHTRAG_RELATION_CHUNKS` |
+| `KV_STORE_LLM_RESPONSE_CACHE` | `LIGHTRAG_LLM_CACHE` |
+| `VECTOR_STORE_CHUNKS` | `LIGHTRAG_VDB_CHUNKS` |
+| `VECTOR_STORE_ENTITIES` | `LIGHTRAG_VDB_ENTITY` |
+| `VECTOR_STORE_RELATIONSHIPS` | `LIGHTRAG_VDB_RELATION` |
+| `DOC_STATUS` | `LIGHTRAG_DOC_STATUS` |
+
+**Why This Matters:**
+- If you create tables with different names (e.g., `hybridrag_*`), LightRAG won't find them
+- Queries will return "No query context could be built"
+- Data appears to be missing even though it exists
+
+**What To Do:**
+1. Let LightRAG create its own tables (recommended)
+2. OR migrate existing data INTO `LIGHTRAG_*` tables
+3. DO NOT use custom table prefixes
+
+**Example: Migrating Custom Tables to LightRAG Tables**
+```sql
+-- Copy from custom tables to LightRAG tables
+INSERT INTO lightrag_vdb_chunks (id, workspace, content, content_vector, ...)
+SELECT chunk_id, workspace, content, embedding, ...
+FROM my_custom_chunks_table;
+```
+
+---
+
+### 🚨 EMBEDDING_DIM Environment Variable (CRITICAL!)
+
+**LightRAG's PostgreSQL storage uses the `EMBEDDING_DIM` environment variable to create vector columns.**
+
+| Setting | Default | Your Value |
+|---------|---------|------------|
+| `EMBEDDING_DIM` | **1024** | Must match your embedding model! |
+
+**Common Embedding Dimensions:**
+
+| Model | Dimension | EMBEDDING_DIM Setting |
+|-------|-----------|----------------------|
+| Azure text-embedding-3-small | 768 | `EMBEDDING_DIM=768` |
+| OpenAI text-embedding-3-small | 1536 | `EMBEDDING_DIM=1536` |
+| OpenAI text-embedding-3-large | 3072 | `EMBEDDING_DIM=3072` |
+| text-embedding-ada-002 | 1536 | `EMBEDDING_DIM=1536` |
+
+**Where to Set:**
+
+1. **MCP Server Config (`.claude.json`):**
+   ```json
+   {
+     "hybridrag-specstory": {
+       "env": {
+         "HYBRIDRAG_DATABASE_NAME": "specstory",
+         "EMBEDDING_DIM": "768"
+       }
+     }
+   }
+   ```
+
+2. **Docker Compose:**
+   ```yaml
+   environment:
+     EMBEDDING_DIM: "768"
+   ```
+
+3. **Shell/Script:**
+   ```bash
+   export EMBEDDING_DIM=768
+   ```
+
+**What Happens Without This:**
+- LightRAG creates `content_vector VECTOR(1024)` columns
+- Your embeddings don't match the schema
+- Queries return: `"No query context could be built"`
+- Vector similarity search fails silently
+
+**Detect Your Embedding Dimension:**
+```bash
+# From existing JSON data
+python -c "
+import json, base64, zlib
+with open('lightrag_db/vdb_chunks.json') as f:
+    data = json.load(f)
+    chunk = data['data'][0]
+    decoded = base64.b64decode(chunk['vector'])
+    decompressed = zlib.decompress(decoded)
+    print(f'Dimension: {len(decompressed) // 4}')
+"
+```
+
 ---
 
 ## Quick Start (5 Commands)
@@ -94,7 +196,7 @@ docker run -d --name hybridrag-postgres \
   -e POSTGRES_USER=hybridrag \
   -e POSTGRES_PASSWORD=your_secure_password_2026 \
   -e POSTGRES_DB=specstory \
-  -p 5434:5432 \
+  -p 5433:5432 \
   apache/age:latest
 
 # 2. Install pgvector extension
@@ -121,7 +223,7 @@ docker exec hybridrag-postgres psql -U hybridrag -d specstory \
 ```
 
 **Key Points:**
-- Port `5434` avoids conflicts with default PostgreSQL (5432)
+- Port `5433` avoids conflicts with default PostgreSQL (5432)
 - Database name `specstory` should be simple (lowercase, no special chars)
 - Password should be strong (avoid default passwords in production)
 
@@ -290,7 +392,7 @@ python hybridrag.py database register \
   --source-folder ~/Documents/code \
   --backend postgres \
   --postgres-host localhost \
-  --postgres-port 5434 \
+  --postgres-port 5433 \
   --postgres-user hybridrag \
   --postgres-password your_secure_password_2026 \
   --postgres-database specstory \
@@ -326,7 +428,7 @@ databases:
     backend_config:
       backend_type: postgres
       postgres_host: localhost
-      postgres_port: 5434
+      postgres_port: 5433
       postgres_user: hybridrag
       postgres_password: your_secure_password_2026
       postgres_database: specstory
@@ -345,7 +447,7 @@ postgresql://user:password@host:port/database
 
 Example:
 ```
-postgresql://hybridrag:your_secure_password_2026@localhost:5434/specstory
+postgresql://hybridrag:your_secure_password_2026@localhost:5433/specstory
 ```
 
 ---
@@ -425,6 +527,32 @@ python hybridrag.py query \
 ---
 
 ## Troubleshooting
+
+### 🚨 MCP Server: Invalid JSON Output (CRITICAL!)
+
+**Problem:** MCP server returns garbled/invalid JSON output
+
+**Symptom:**
+```
+Error: Invalid JSON in MCP response
+Failed to parse tool response
+```
+
+**Root Cause:** `litellm.set_verbose = True` in server code corrupts stdio protocol
+
+**Solution:** Set `litellm.set_verbose = False` in `hybridrag_mcp/server.py` (line ~152)
+
+```python
+# WRONG - corrupts MCP stdio protocol
+litellm.set_verbose = True
+
+# CORRECT - MCP works properly
+litellm.set_verbose = False
+```
+
+**Why This Happens:** LiteLLM verbose mode writes debug output to stdout, which interferes with MCP's JSON-over-stdio protocol. The MCP client receives mixed debug text and JSON, causing parse failures.
+
+---
 
 ### Error: "function create_graph(unknown) does not exist"
 
@@ -545,7 +673,7 @@ python hybridrag.py migrate json-to-postgres \
   --json-path ~/databases/specstory_json \
   --postgres-database specstory \
   --postgres-host localhost \
-  --postgres-port 5434 \
+  --postgres-port 5433 \
   --postgres-user hybridrag \
   --postgres-password your_secure_password_2026
 
@@ -558,7 +686,7 @@ python hybridrag.py database update \
   --name specstory-prod \
   --backend postgres \
   --postgres-host localhost \
-  --postgres-port 5434
+  --postgres-port 5433
 ```
 
 ### What to Expect

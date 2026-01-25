@@ -1,0 +1,96 @@
+{
+  "session_id": "doc-cleanup-2026-01-25",
+  "created_at": "2026-01-25T11:50:00Z",
+  "last_updated": "2026-01-25T12:00:00Z",
+  "status": "active",
+  "focus": "Documentation Cleanup",
+
+  "completed_tasks": [
+    {
+      "id": 1,
+      "description": "Fix shared-postgres-deployment.md Docker image",
+      "completed_at": "2026-01-25T11:52:00Z",
+      "changes": ["Changed pgvector/pgvector:pg16 to apache/age:latest", "Added entrypoint for pgvector", "Added start_period: 90s"]
+    },
+    {
+      "id": 2,
+      "description": "Update POSTGRESQL_BACKEND_SETUP.md port to 5433",
+      "completed_at": "2026-01-25T11:54:00Z",
+      "changes": ["Standardized port from 5434 to 5433", "Added litellm.set_verbose warning"]
+    },
+    {
+      "id": 3,
+      "description": "Fix docs/README.md memory-bank path",
+      "completed_at": "2026-01-25T11:55:00Z",
+      "changes": ["Changed ../memory-bank/ to ../context-knight/memory-bank/"]
+    },
+    {
+      "id": 4,
+      "description": "Create .env.example at project root",
+      "completed_at": "2026-01-25T11:56:00Z",
+      "changes": ["Comprehensive environment variable documentation", "EMBEDDING_DIM section", "PostgreSQL and MCP config"]
+    },
+    {
+      "id": 5,
+      "description": "Create docs/FRESH_INSTALL.md",
+      "completed_at": "2026-01-25T11:58:00Z",
+      "changes": ["Two-path guide: JSON vs PostgreSQL", "Step-by-step verification", "Quick decision matrix"]
+    },
+    {
+      "id": 6,
+      "description": "Create docs/TROUBLESHOOTING.md",
+      "completed_at": "2026-01-25T12:00:00Z",
+      "changes": ["Consolidated all troubleshooting", "Critical issues section", "Diagnostic commands"]
+    },
+    {
+      "id": 7,
+      "description": "Create context-knight/memory-bank/progress.md",
+      "completed_at": "2026-01-25T12:02:00Z",
+      "changes": ["Development milestones", "Recent fixes", "Architecture decisions"]
+    }
+  ],
+
+  "pending_tasks": [],
+
+  "key_discoveries": [
+    {
+      "type": "critical_fix",
+      "description": "litellm.set_verbose = True corrupts MCP stdio protocol",
+      "location": "hybridrag_mcp/server.py:152",
+      "solution": "Set to False",
+      "saved_to_graphiti": true
+    },
+    {
+      "type": "config_conflict",
+      "description": "shared-postgres-deployment.md used wrong Docker image",
+      "location": "docs/user-stories/shared-postgres-deployment.md:140",
+      "solution": "Changed to apache/age:latest + pgvector entrypoint"
+    },
+    {
+      "type": "port_inconsistency",
+      "description": "POSTGRESQL_BACKEND_SETUP.md used port 5434",
+      "location": "docs/technical/POSTGRESQL_BACKEND_SETUP.md",
+      "solution": "Standardized to 5433"
+    }
+  ],
+
+  "files_modified": [
+    "docs/user-stories/shared-postgres-deployment.md",
+    "docs/technical/POSTGRESQL_BACKEND_SETUP.md",
+    "docs/README.md",
+    ".env.example"
+  ],
+
+  "files_created": [
+    "docs/FRESH_INSTALL.md",
+    "docs/TROUBLESHOOTING.md",
+    "context-knight/memory-bank/progress.md",
+    ".memory/session.json"
+  ],
+
+  "context_notes": [
+    "Plan was generated in previous session with context compaction",
+    "Critical fix (litellm verbose) already saved to Graphiti",
+    "All documentation now consistent on port 5433 and apache/age image"
+  ]
+}

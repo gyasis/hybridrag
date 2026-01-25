@@ -137,7 +137,9 @@ version: '3.8'
 
 services:
   postgres:
-    image: pgvector/pgvector:pg16
+    # CRITICAL: Use apache/age:latest (NOT pgvector/pgvector:pg16)
+    # LightRAG requires BOTH Apache AGE + pgvector extensions
+    image: apache/age:latest
     container_name: hybridrag-shared-postgres
     restart: unless-stopped
 
@@ -146,6 +148,15 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       # No specific database - we'll create multiple
       POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=en_US.UTF-8"
+
+    # Install pgvector on first run (AGE is already included)
+    entrypoint: >
+      bash -c "
+        apt-get update &&
+        apt-get install -y --no-install-recommends postgresql-17-pgvector &&
+        rm -rf /var/lib/apt/lists/* &&
+        exec docker-entrypoint.sh postgres
+      "
 
     # NO PORTS - Internal network only!
 
@@ -157,6 +168,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 90s  # Increased for pgvector installation
 
     networks:
       - hybridrag-shared-net
