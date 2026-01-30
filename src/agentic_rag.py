@@ -127,7 +127,8 @@ class LightRAGToolsProvider:
             if result.error:
                 return json.dumps({"error": result.error})
 
-            return result.result
+            # Defensive: ensure we never return None
+            return result.result or ""
 
         except Exception as e:
             logger.error(f"[LightRAG Tool] Error: {e}")

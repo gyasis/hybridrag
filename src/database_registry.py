@@ -119,6 +119,9 @@ class DatabaseEntry:
     backend_type: str = "json"  # json, postgres, mongodb
     backend_config: Optional[Dict[str, Any]] = None
 
+    # Model configuration (per-database, for multi-instance support)
+    model_config: Optional[Dict[str, Any]] = None
+
     def __post_init__(self):
         """Validate and normalize fields."""
         # Normalize paths to absolute (if provided)
@@ -188,6 +191,38 @@ class DatabaseEntry:
             backend_type=backend_type_enum,
             **config_dict
         )
+
+    def get_model_config(self) -> Optional[Dict[str, Any]]:
+        """Get model configuration for this database.
+
+        Returns:
+            Dictionary with model settings, or None if not configured.
+            Supports env var interpolation for api_keys using ${VAR_NAME} syntax.
+
+        Expected keys:
+            llm_model: str - LLM model name (e.g., "openai/gpt-4o-mini")
+            embedding_model: str - Embedding model name
+            embedding_dim: int - Embedding dimensions
+            api_keys: dict - API keys with env var interpolation
+        """
+        if self.model_config is None:
+            return None
+
+        # Deep copy to avoid mutation
+        config = dict(self.model_config)
+
+        # Interpolate environment variables in api_keys
+        if 'api_keys' in config and isinstance(config['api_keys'], dict):
+            resolved_keys = {}
+            for key_name, key_value in config['api_keys'].items():
+                if isinstance(key_value, str) and key_value.startswith('${') and key_value.endswith('}'):
+                    env_var = key_value[2:-1]
+                    resolved_keys[key_name] = os.environ.get(env_var, '')
+                else:
+                    resolved_keys[key_name] = key_value
+            config['api_keys'] = resolved_keys
+
+        return config
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for YAML storage."""

@@ -1,6 +1,6 @@
-# HybridRAG PostgreSQL Backend with pgvector
-# ==========================================
-# Auto-provision PostgreSQL with pgvector extension for HybridRAG storage.
+# HybridRAG PostgreSQL Backend with Apache AGE + pgvector
+# ========================================================
+# Auto-provision PostgreSQL with both AGE (graph) and pgvector extensions.
 #
 # Usage:
 #   docker-compose -f docker-compose.postgres.yaml up -d
@@ -9,27 +9,34 @@
 #   hybridrag backend setup-docker
 #
 # Environment Variables:
-#   POSTGRES_PASSWORD - Database password (default: hybridrag_default)
-#   POSTGRES_PORT     - Host port mapping (default: 5432)
+#   POSTGRES_PASSWORD - Database password (default: hybridrag_secure_2026)
+#   POSTGRES_PORT     - Host port mapping (default: 5433, since 5432 is used by OpenMetadata)
 #   POSTGRES_DATA_DIR - Host path for data volume (default: Docker volume)
-
-version: '3.8'
 
 services:
   hybridrag-postgres:
-    image: pgvector/pgvector:pg16
+    image: apache/age:latest
     container_name: hybridrag-postgres
     restart: unless-stopped
 
     environment:
       POSTGRES_USER: hybridrag
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hybridrag_default}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hybridrag_secure_2026}
       POSTGRES_DB: hybridrag
-      # Optimization for RAG workloads
       POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=en_US.UTF-8"
 
+    # Install pgvector extension before PostgreSQL starts
+    # Apache AGE image already has the AGE extension
+    entrypoint: >
+      bash -c "
+        apt-get update &&
+        apt-get install -y --no-install-recommends postgresql-17-pgvector &&
+        rm -rf /var/lib/apt/lists/* &&
+        exec docker-entrypoint.sh postgres
+      "
+
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "${POSTGRES_PORT:-5433}:5432"
 
     volumes:
       # Persistent data volume
@@ -42,15 +49,15 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 30s
+      start_period: 90s  # Increased for pgvector installation
 
-    # Memory limits for stability
+    # Memory limits - increased for 6.6GB migration
     deploy:
       resources:
         limits:
-          memory: 2G
+          memory: 4G
         reservations:
-          memory: 512M
+          memory: 1G
 
     # Logging configuration
     logging:
@@ -63,30 +70,25 @@ services:
     command:
       - "postgres"
       - "-c"
-      - "shared_buffers=256MB"
+      - "shared_buffers=512MB"
       - "-c"
-      - "effective_cache_size=768MB"
+      - "effective_cache_size=1536MB"
       - "-c"
-      - "maintenance_work_mem=128MB"
+      - "maintenance_work_mem=256MB"
       - "-c"
-      - "work_mem=16MB"
+      - "work_mem=32MB"
       - "-c"
       - "max_connections=100"
       - "-c"
       - "wal_level=replica"
       - "-c"
-      - "max_wal_size=1GB"
+      - "max_wal_size=2GB"
       - "-c"
-      - "min_wal_size=80MB"
+      - "min_wal_size=256MB"
 
 volumes:
   hybridrag-pgdata:
     driver: local
-    # Optional: Use specific host path
-    # driver_opts:
-    #   type: none
-    #   o: bind
-    #   device: ${POSTGRES_DATA_DIR:-/var/lib/hybridrag/postgres}
 
 networks:
   default:

@@ -18,9 +18,30 @@ from tqdm import tqdm
 from datetime import datetime
 
 from lightrag import LightRAG, QueryParam
-from lightrag.llm.openai import openai_complete_if_cache, openai_embed
+from lightrag.llm.openai import openai_complete_if_cache
 from lightrag.utils import EmbeddingFunc
 from lightrag.kg.shared_storage import initialize_pipeline_status
+import numpy as np
+from openai import AsyncOpenAI
+
+
+async def openai_embed_768(
+    texts: list[str],
+    model: str = "text-embedding-3-small",
+    api_key: str = None,
+    dimensions: int = 768,
+) -> np.ndarray:
+    """
+    Custom embedding function that supports dimensions parameter.
+    Uses text-embedding-3-small with 768 dimensions to match PostgreSQL data.
+    """
+    client = AsyncOpenAI(api_key=api_key)
+    response = await client.embeddings.create(
+        model=model,
+        input=texts,
+        dimensions=dimensions,
+    )
+    return np.array([item.embedding for item in response.data], dtype=np.float32)
 
 # Configure logging
 logging.basicConfig(
@@ -87,11 +108,12 @@ class FolderToLightRAG:
                     **kwargs
                 ),
             embedding_func=EmbeddingFunc(
-                embedding_dim=1536,
-                func=lambda texts: openai_embed(
+                embedding_dim=768,
+                func=lambda texts: openai_embed_768(
                     texts,
                     model=embed_model,
-                    api_key=api_key
+                    api_key=api_key,
+                    dimensions=768,
                 ),
             ),
             max_parallel_insert=2,  # Process 2 documents at a time

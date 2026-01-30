@@ -260,6 +260,11 @@ class QueryResult:
     execution_time: float
     error: Optional[str] = None
 
+    def __post_init__(self):
+        """Ensure result is never None - coerce to empty string."""
+        if self.result is None:
+            self.result = ""
+
 class LRUCache:
     """
     Simple LRU (Least Recently Used) cache with max size limit.
@@ -339,6 +344,8 @@ class HybridLightRAGCore:
         self._ensure_working_dir()
         self._init_lightrag()
         self.rag_initialized = False
+        # Async lock to prevent race conditions during initialization
+        self._init_lock = asyncio.Lock()
         # Use LRU cache with bounded size to prevent memory leaks
         self.context_cache = LRUCache(max_size=cache_max_size)
 
@@ -346,41 +353,68 @@ class HybridLightRAGCore:
         logger.info(f"HybridLightRAGCore initialized with working dir: {self.config.working_dir}{backend_info}")
     
     def _setup_api_key(self):
-        """Setup API key and configure LiteLLM for Azure/OpenAI."""
-        # Get API key from config or environment
-        self.api_key = self.config.api_key or os.getenv("AZURE_API_KEY") or os.getenv("AZURE_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
-        if not self.api_key:
-            raise ValueError(
-                "API key not found. Set AZURE_API_KEY, AZURE_OPENAI_API_KEY, or OPENAI_API_KEY "
-                "environment variable or provide it in configuration."
-            )
+        """Setup API key and configure LiteLLM for Azure/OpenAI.
 
-        # Detect if using Azure based on model name or environment
-        self.is_azure = (
-            self.config.model_name.startswith("azure/") or
-            self.config.embedding_model.startswith("azure/") or
-            os.getenv("AZURE_API_BASE") is not None or
-            os.getenv("AZURE_OPENAI_ENDPOINT") is not None
-        )
+        IMPORTANT: Provider detection is based on MODEL PREFIX ONLY, not environment variables.
+        This prevents misconfiguration when switching between providers.
 
-        # Store Azure-specific configuration for LiteLLM calls
-        # Priority: AZURE_API_BASE > AZURE_OPENAI_ENDPOINT
+        Provider detection:
+        - Model starts with "azure/" -> Azure OpenAI
+        - Model starts with "openai/" or no prefix -> OpenAI
+        - Model starts with "anthropic/" -> Anthropic
+        - etc.
+        """
+        # Detect provider from MODEL NAME prefix (not environment variables!)
+        # This is the authoritative source for which provider to use
+        self.is_azure = self.config.model_name.startswith("azure/")
+        self.is_azure_embed = self.config.embedding_model.startswith("azure/")
+
+        logger.info(f"Provider detection: model={self.config.model_name} -> is_azure={self.is_azure}")
+        logger.info(f"Provider detection: embed_model={self.config.embedding_model} -> is_azure_embed={self.is_azure_embed}")
+
+        # Get API key based on detected provider
+        if self.is_azure:
+            self.api_key = self.config.api_key or os.getenv("AZURE_API_KEY") or os.getenv("AZURE_OPENAI_API_KEY")
+            if not self.api_key:
+                raise ValueError(
+                    "Azure API key not found. Set AZURE_API_KEY or AZURE_OPENAI_API_KEY "
+                    "environment variable for Azure models."
+                )
+        else:
+            # For OpenAI and other providers, use OPENAI_API_KEY
+            self.api_key = self.config.api_key or os.getenv("OPENAI_API_KEY")
+            if not self.api_key:
+                raise ValueError(
+                    f"API key not found for model '{self.config.model_name}'. "
+                    "Set OPENAI_API_KEY environment variable."
+                )
+
+        # Get embedding API key (may differ from LLM key if using different providers)
+        if self.is_azure_embed:
+            self.embed_api_key = os.getenv("AZURE_API_KEY") or os.getenv("AZURE_OPENAI_API_KEY") or self.api_key
+        else:
+            self.embed_api_key = os.getenv("OPENAI_API_KEY") or self.api_key
+
+        # Store Azure-specific configuration for LiteLLM calls (only used if is_azure=True)
         self.azure_api_base = os.getenv("AZURE_API_BASE") or os.getenv("AZURE_OPENAI_ENDPOINT")
         self.azure_api_version = os.getenv("AZURE_API_VERSION", "2024-02-01")
 
-        # Configure LiteLLM for Azure if needed
+        # Configure LiteLLM environment based on provider
         if self.is_azure:
             if self.azure_api_base:
-                # Set LiteLLM Azure configuration via environment
                 os.environ['AZURE_API_KEY'] = self.api_key
                 os.environ['AZURE_API_BASE'] = self.azure_api_base
                 os.environ['AZURE_API_VERSION'] = self.azure_api_version
                 logger.info(f"Configured LiteLLM for Azure OpenAI: {self.azure_api_base} (version: {self.azure_api_version})")
             else:
-                logger.warning("Azure model detected but no AZURE_API_BASE or AZURE_OPENAI_ENDPOINT set")
+                raise ValueError(
+                    "Azure model detected but AZURE_API_BASE or AZURE_OPENAI_ENDPOINT not set. "
+                    "Set one of these environment variables for Azure models."
+                )
         else:
-            # Only set OPENAI_API_KEY for non-Azure configurations
+            # For OpenAI/other providers - set OpenAI key and ensure Azure params don't leak
             os.environ['OPENAI_API_KEY'] = self.api_key
+            logger.info(f"Configured LiteLLM for OpenAI: using OPENAI_API_KEY")
     
     def _ensure_working_dir(self):
         """Ensure working directory exists."""
@@ -397,6 +431,11 @@ class HybridLightRAGCore:
         """
         backend_type = self.backend_config.backend_type.value
         logger.info(f"Initializing LightRAG instance with LiteLLM (backend: {backend_type})")
+
+        # CRITICAL: Set EMBEDDING_DIM in os.environ for LightRAG's PostgreSQL storage
+        # LightRAG's postgres_impl.py reads this directly for vector column creation
+        os.environ["EMBEDDING_DIM"] = str(self.config.embedding_dim)
+        logger.info(f"Set EMBEDDING_DIM={self.config.embedding_dim} for PostgreSQL vector columns")
 
         # Known LiteLLM-compatible kwargs (filter out LightRAG internal objects)
         LITELLM_ALLOWED_KWARGS = {
@@ -420,18 +459,26 @@ class HybridLightRAGCore:
                 - Exponential backoff with jitter for transient errors
                 - Smart retry logic (only retries 429, 5xx; not 401, 400)
             """
+            import time as _time
+            _llm_start = _time.time()
+            _prompt_preview = prompt[:200] + "..." if len(prompt) > 200 else prompt
+            logger.info(f"🚀 LLM SYNTHESIS START | model={self.config.model_name} | prompt_len={len(prompt)} | preview: {_prompt_preview}")
+
             messages = []
 
             # Add system prompt if provided
             if system_prompt:
                 messages.append({"role": "system", "content": system_prompt})
+                logger.debug(f"  └─ system_prompt_len={len(system_prompt)}")
 
             # Add history messages if provided
             if history_messages:
                 messages.extend(history_messages)
+                logger.debug(f"  └─ history_messages={len(history_messages)}")
 
             # Add the user prompt
             messages.append({"role": "user", "content": prompt})
+            logger.info(f"  └─ total_messages={len(messages)} | is_azure={self.is_azure}")
 
             # Filter kwargs to only include LiteLLM-compatible parameters
             # This excludes LightRAG internal objects like JsonKVStorage
@@ -457,15 +504,33 @@ class HybridLightRAGCore:
 
             # Inner function for retry wrapper
             async def _do_completion():
-                response = await litellm.acompletion(**litellm_kwargs)
-                return response.choices[0].message.content
+                _call_start = _time.time()
+                logger.info(f"  📡 LITELLM CALL START | model={litellm_kwargs['model']} | timeout={litellm_kwargs.get('timeout')}s")
+                try:
+                    response = await litellm.acompletion(**litellm_kwargs)
+                    _call_elapsed = _time.time() - _call_start
+                    content = response.choices[0].message.content
+                    logger.info(f"  ✅ LITELLM CALL SUCCESS | elapsed={_call_elapsed:.2f}s | response_len={len(content) if content else 0}")
+                    return content
+                except Exception as _e:
+                    _call_elapsed = _time.time() - _call_start
+                    logger.error(f"  ❌ LITELLM CALL FAILED | elapsed={_call_elapsed:.2f}s | error={type(_e).__name__}: {_e}")
+                    raise
 
             # Execute with retry logic for transient errors
-            return await retry_with_backoff(
-                _do_completion,
-                max_retries=LITELLM_MAX_RETRIES,
-                operation_name="LiteLLM completion"
-            )
+            try:
+                result = await retry_with_backoff(
+                    _do_completion,
+                    max_retries=LITELLM_MAX_RETRIES,
+                    operation_name="LiteLLM completion"
+                )
+                _llm_total = _time.time() - _llm_start
+                logger.info(f"🏁 LLM SYNTHESIS COMPLETE | total_time={_llm_total:.2f}s | result_len={len(result) if result else 0}")
+                return result
+            except Exception as _e:
+                _llm_total = _time.time() - _llm_start
+                logger.error(f"💥 LLM SYNTHESIS FAILED | total_time={_llm_total:.2f}s | error={type(_e).__name__}: {_e}")
+                raise
 
         # Embedding function using LiteLLM for provider-agnostic embeddings
         async def embedding_func(texts: List[str]) -> List[List[float]]:
@@ -478,16 +543,20 @@ class HybridLightRAGCore:
                 - Smart retry logic (only retries 429, 5xx; not 401, 400)
             """
             # Build LiteLLM embedding call kwargs
+            # Note: Use embed_api_key which may differ from llm api_key if using different providers
             litellm_kwargs = {
                 "model": self.config.embedding_model,
                 "input": texts,
-                "api_key": self.api_key,
+                "api_key": self.embed_api_key,
                 # Set explicit timeout to prevent indefinite hangs
-                "timeout": LITELLM_DEFAULT_TIMEOUT
+                "timeout": LITELLM_DEFAULT_TIMEOUT,
+                # Pass dimensions to match configured embedding size (synced with PostgreSQL)
+                "dimensions": self.config.embedding_dim,
             }
 
             # Add Azure-specific parameters if embedding model uses Azure
-            if self.config.embedding_model.startswith("azure/") and self.azure_api_base:
+            # This allows using Azure embeddings even when LLM is OpenAI (or vice versa)
+            if self.is_azure_embed and self.azure_api_base:
                 litellm_kwargs["api_base"] = self.azure_api_base
                 litellm_kwargs["api_version"] = self.azure_api_version
 
@@ -550,11 +619,20 @@ class HybridLightRAGCore:
         logger.info(f"LightRAG initialized with LiteLLM (model: {self.config.model_name})")
     
     async def _ensure_initialized(self):
-        """Ensure LightRAG storages are initialized."""
-        if not self.rag_initialized:
+        """Ensure LightRAG storages are initialized (thread-safe)."""
+        # Fast path: already initialized
+        if self.rag_initialized:
+            return
+
+        # Acquire lock to prevent race conditions
+        async with self._init_lock:
+            # Double-check after acquiring lock
+            if self.rag_initialized:
+                return
+
             logger.info("Initializing LightRAG storages for first query...")
             await self.rag.initialize_storages()
-            
+
             # Import and call initialize_pipeline_status for fresh database
             try:
                 from lightrag.kg.shared_storage import initialize_pipeline_status
@@ -568,7 +646,7 @@ class HybridLightRAGCore:
                     logger.info("LightRAG pipeline status initialized successfully")
                 except ImportError as e:
                     logger.warning(f"Could not import initialize_pipeline_status: {e}")
-            
+
             self.rag_initialized = True
             logger.info("LightRAG storages and pipeline initialized successfully")
     
@@ -735,7 +813,8 @@ class HybridLightRAGCore:
             top_k=top_k,
             **kwargs
         )
-        return result.result
+        # Defensive: ensure we never return None (QueryResult.__post_init__ should handle this)
+        return result.result or ""
     
     def get_stats(self) -> Dict[str, Any]:
         """Get statistics about the LightRAG instance."""

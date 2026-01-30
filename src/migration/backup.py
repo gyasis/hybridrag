@@ -336,43 +336,121 @@ class StagedMigration:
 
     def _detect_embedding_dimension(self) -> int:
         """
-        Detect embedding dimension from source vdb_chunks.json file.
+        Detect embedding dimension from source vdb_*.json files.
+
+        Detection order (first successful wins):
+        1. 'embedding_dim' key in JSON metadata (authoritative)
+        2. Matrix field dimensions (nano-vectordb format)
+        3. Individual vector fields (__vector__ or vector)
+        4. Default: 1536 (text-embedding-3-small default)
 
         Returns:
             Detected dimension (default: 1536 if cannot be determined)
         """
-        chunks_file = self.source_path / 'vdb_chunks.json'
-        if not chunks_file.exists():
-            logger.debug("No vdb_chunks.json found, using default dimension 1536")
-            return 1536
+        # Check multiple vdb files - entities often has the most reliable data
+        vdb_files = ['vdb_entities.json', 'vdb_chunks.json', 'vdb_relationships.json']
 
-        try:
-            with open(chunks_file, 'r') as f:
-                data = json.load(f)
+        for vdb_file in vdb_files:
+            file_path = self.source_path / vdb_file
+            if not file_path.exists():
+                continue
 
-            # vdb_chunks.json has 'data' key with list of chunks
-            chunks = []
-            if isinstance(data, dict) and 'data' in data:
-                chunks = data['data']
-            elif isinstance(data, list):
-                chunks = data
+            try:
+                with open(file_path, 'r') as f:
+                    data = json.load(f)
 
-            if chunks:
-                # Find first chunk with an embedding
-                for chunk in chunks[:10]:  # Check first 10 chunks
-                    # Try different possible embedding key names
-                    for key in ['vector', 'embedding', '__vector__']:
-                        if key in chunk and chunk[key]:
-                            dim = len(chunk[key])
-                            logger.info(f"Detected embedding dimension: {dim}")
+                if not isinstance(data, dict):
+                    continue
+
+                # Method 1: Check explicit 'embedding_dim' key (most reliable)
+                if 'embedding_dim' in data:
+                    dim = data['embedding_dim']
+                    logger.info(f"Detected embedding dimension from {vdb_file} metadata: {dim}")
+                    return dim
+
+                # Method 2: Check matrix field dimensions (nano-vectordb format)
+                matrix_str = data.get('matrix', '')
+                if matrix_str and isinstance(matrix_str, str) and len(matrix_str) > 100:
+                    try:
+                        import base64
+                        import numpy as np
+
+                        decoded = base64.b64decode(matrix_str)
+                        arr = np.frombuffer(decoded, dtype=np.float32)
+
+                        # Try common embedding dimensions
+                        for test_dim in [1536, 768, 1024, 3072, 512, 384]:
+                            if len(arr) % test_dim == 0:
+                                num_embeddings = len(arr) // test_dim
+                                if num_embeddings > 0:
+                                    logger.info(f"Detected embedding dimension from {vdb_file} matrix: {test_dim} ({num_embeddings} embeddings)")
+                                    return test_dim
+                    except Exception as e:
+                        logger.debug(f"Could not decode matrix from {vdb_file}: {e}")
+
+                # Method 3: Check individual vector fields
+                items = data.get('data', [])
+                if items:
+                    for item in items[:10]:
+                        # Try '__vector__' (raw list format)
+                        if '__vector__' in item and item['__vector__']:
+                            dim = len(item['__vector__'])
+                            logger.info(f"Detected embedding dimension from {vdb_file} __vector__: {dim}")
                             return dim
 
-            logger.debug("No embeddings found, using default dimension 1536")
-            return 1536
+                        # Try 'vector' (encoded format)
+                        if 'vector' in item and item['vector']:
+                            decoded = self._decode_embedding(item['vector'])
+                            if decoded:
+                                dim = len(decoded)
+                                logger.info(f"Detected embedding dimension from {vdb_file} vector: {dim}")
+                                return dim
+
+            except Exception as e:
+                logger.debug(f"Could not read {vdb_file}: {e}")
+                continue
+
+        logger.warning("Could not detect embedding dimension from any vdb file, using default: 1536")
+        return 1536
+
+    def _decode_embedding(self, encoded_vector: Optional[str]) -> Optional[List[float]]:
+        """
+        Decode a base64+zlib encoded embedding vector.
+
+        The HybridRAG/LightRAG format stores embeddings as:
+        - Base64 encoded string
+        - Zlib compressed
+        - Float32 packed binary
+
+        Args:
+            encoded_vector: Base64 encoded string or None
+
+        Returns:
+            List of floats or None if decoding fails
+        """
+        if not encoded_vector or not isinstance(encoded_vector, str):
+            return None
+
+        try:
+            import base64
+            import zlib
+            import struct
+
+            # Decode base64
+            decoded = base64.b64decode(encoded_vector)
+
+            # Decompress zlib
+            decompressed = zlib.decompress(decoded)
+
+            # Unpack as float32 array
+            num_floats = len(decompressed) // 4
+            embedding = list(struct.unpack(f'{num_floats}f', decompressed[:num_floats * 4]))
+
+            return embedding
 
         except Exception as e:
-            logger.warning(f"Could not detect embedding dimension: {e}")
-            return 1536
+            logger.debug(f"Could not decode embedding: {e}")
+            return None
 
     async def prepare(self) -> bool:
         """
@@ -705,8 +783,9 @@ class StagedMigration:
         for chunk in chunks:
             chunk_id = chunk.get('__id__', '')
             content = chunk.get('content', '')
-            embedding = chunk.get('__vector__')
-            metadata = {k: v for k, v in chunk.items() if k not in ('__id__', '__vector__', 'content')}
+            # Handle both 'vector' (encoded) and '__vector__' (raw list) formats
+            embedding = self._decode_embedding(chunk.get('vector')) or chunk.get('__vector__')
+            metadata = {k: v for k, v in chunk.items() if k not in ('__id__', '__vector__', 'vector', 'content')}
 
             if embedding:
                 await conn.execute(f"""

@@ -2,8 +2,8 @@
 # ==================================
 # Install with: pip install -r requirements-mcp.txt
 
-# Core MCP Server Framework
-fastmcp>=2.0.0
+# Core MCP Server Framework (2.14+ required for task=True background execution)
+fastmcp>=2.14.2
 
 # LightRAG Knowledge Graph
 lightrag-hku>=0.0.0.6

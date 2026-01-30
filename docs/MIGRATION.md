@@ -206,6 +206,95 @@ python hybridrag.py backend migrate mydb --staged \
 #    Resuming from last checkpoint...
 ```
 
+## Embedding Dimension Detection (Automatic)
+
+**The migration system automatically detects embedding dimensions from your JSON files.**
+
+The migration reads the `embedding_dim` field from nano-vectordb JSON files (vdb_entities.json, vdb_chunks.json, vdb_relationships.json). This is the authoritative source for dimension information.
+
+### Detection Priority
+
+1. **`embedding_dim` key in JSON metadata** (most reliable - nano-vectordb stores this)
+2. **Matrix field analysis** (base64-encoded numpy array in nano-vectordb format)
+3. **Individual vector fields** (legacy format fallback)
+4. **Default: 1536** (text-embedding-3-small standard dimension)
+
+### Common Embedding Dimensions
+
+| Model | Dimension |
+|-------|-----------|
+| OpenAI text-embedding-3-small | 1536 (default, configurable: 256-1536) |
+| Azure text-embedding-3-small | 1536 (configurable: 256-1536) |
+| OpenAI text-embedding-3-large | 3072 |
+| text-embedding-ada-002 | 1536 |
+| sentence-transformers (mpnet) | 768 |
+
+### Manual Override (Optional)
+
+If you need to override the detected dimension:
+
+**Environment Variable:**
+```bash
+export LIGHTRAG_EMBEDDING_DIM=1536
+python hybridrag.py backend migrate mydb --staged ...
+```
+
+**In MCP Server Configuration (`.claude.json`):**
+```json
+{
+  "hybridrag-specstory": {
+    "env": {
+      "HYBRIDRAG_DATABASE_NAME": "specstory",
+      "LIGHTRAG_EMBEDDING_DIM": "1536"
+    }
+  }
+}
+```
+
+### Verifying Your Embedding Dimension
+
+Check your existing JSON data:
+```bash
+# Method 1: Read embedding_dim from JSON metadata (recommended)
+python -c "
+import json
+with open('lightrag_db/vdb_entities.json') as f:
+    data = json.load(f)
+    print(f'embedding_dim: {data.get(\"embedding_dim\", \"not set\")}')
+"
+
+# Method 2: Detect from matrix field
+python -c "
+import json, base64
+import numpy as np
+with open('lightrag_db/vdb_entities.json') as f:
+    data = json.load(f)
+    matrix_str = data.get('matrix', '')
+    if matrix_str:
+        arr = np.frombuffer(base64.b64decode(matrix_str), dtype=np.float32)
+        # Test common dimensions
+        for dim in [1536, 768, 1024]:
+            if len(arr) % dim == 0:
+                print(f'Detected dimension: {dim} ({len(arr)//dim} embeddings)')
+                break
+"
+
+# Method 3: From PostgreSQL (if already migrated)
+docker exec hybridrag-postgres psql -U hybridrag -d hybridrag -c \
+  "SELECT vector_dims(content_vector) FROM lightrag_vdb_entity LIMIT 1;"
+```
+
+### Dimension Mismatch Errors
+
+If you see errors like `different vector dimensions 1536 and 768`:
+1. **Root cause**: PostgreSQL table created with wrong dimension
+2. **Solution**: The migration now auto-detects from JSON `embedding_dim` field
+3. **Manual fix** (if needed): Run `scripts/alter_vector_dimension.py` then `scripts/restore_embeddings_from_matrix.py`
+
+**The migration system prevents this by reading the dimension directly from your source data.**
+
+---
+
 ## PostgreSQL Schema
 
 The migration creates these tables:
