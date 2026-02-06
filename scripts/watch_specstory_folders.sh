@@ -134,8 +134,9 @@ ingest_folder() {
     fi
 
     # Note: --yes skips confirmation prompts, --quiet suppresses verbose output, </dev/null prevents stdin consumption
-    # Use tee to show progress bar on screen while also logging, stderr goes to log only
-    if python "$HYBRIDRAG_DIR/hybridrag.py" $MODEL_FLAG ingest \
+    # Use --db specstory to auto-resolve backend config from registry
+    # This ensures ingestion uses the same backend (e.g., PostgreSQL) as configured in the registry
+    if python "$HYBRIDRAG_DIR/hybridrag.py" --db specstory $MODEL_FLAG ingest \
         --folder "$folder" \
         --db-action add \
         --metadata "project=$project_name" \

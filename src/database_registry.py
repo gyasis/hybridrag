@@ -115,8 +115,8 @@ class DatabaseEntry:
     api_config: Optional[Dict[str, Any]] = None
     schema_config: Optional[Dict[str, Any]] = None
 
-    # Storage backend configuration (NEW for pluggable backend support)
-    backend_type: str = "json"  # json, postgres, mongodb
+    # Storage backend configuration (pluggable backend support)
+    backend_type: str = "json"  # json, postgres, mongodb, neo4j, milvus, qdrant, faiss, redis, memgraph
     backend_config: Optional[Dict[str, Any]] = None
 
     # Model configuration (per-database, for multi-instance support)

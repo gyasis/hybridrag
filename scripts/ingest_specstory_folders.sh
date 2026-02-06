@@ -235,7 +235,7 @@ while IFS= read -r folder; do
         MODEL_FLAG="--model $MODEL_OVERRIDE"
     fi
 
-    if python "$HYBRIDRAG_DIR/hybridrag.py" $MODEL_FLAG ingest \
+    if python "$HYBRIDRAG_DIR/hybridrag.py" --db specstory $MODEL_FLAG ingest \
         --folder "$folder" \
         --db-action "$CURRENT_DB_ACTION" \
         --metadata "project=$PROJECT_NAME" \

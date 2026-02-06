@@ -11,11 +11,29 @@ import urllib.parse
 
 
 class BackendType(str, Enum):
-    """Supported storage backend types."""
+    """Supported storage backend types.
 
-    JSON = "json"  # Default - JSON files + NanoVectorDB + NetworkX
+    Maps to LightRAG storage implementations:
+    - JSON: JsonKVStorage + NanoVectorDBStorage + NetworkXStorage
+    - POSTGRESQL: PGKVStorage + PGVectorStorage + PGGraphStorage
+    - MONGODB: MongoKVStorage + MongoVectorDBStorage + MongoGraphStorage
+    - NEO4J: Neo4JStorage (graph) - typically paired with other KV/vector stores
+    - MILVUS: MilvusVectorDBStorage (vector) - typically paired with other stores
+    - QDRANT: QdrantVectorDBStorage (vector) - typically paired with other stores
+    - FAISS: FaissVectorDBStorage (vector) - local FAISS index
+    - REDIS: RedisKVStorage + RedisDocStatusStorage
+    - MEMGRAPH: MemgraphStorage (graph) - typically paired with other stores
+    """
+
+    JSON = "json"            # JSON files + NanoVectorDB + NetworkX
     POSTGRESQL = "postgres"  # PostgreSQL + pgvector + AGE
-    MONGODB = "mongodb"  # MongoDB (future)
+    MONGODB = "mongodb"      # MongoDB
+    NEO4J = "neo4j"          # Neo4j graph database
+    MILVUS = "milvus"        # Milvus vector database
+    QDRANT = "qdrant"        # Qdrant vector database
+    FAISS = "faiss"          # Facebook FAISS vector library
+    REDIS = "redis"          # Redis KV + doc status
+    MEMGRAPH = "memgraph"    # Memgraph graph database
 
     @classmethod
     def default(cls) -> "BackendType":
@@ -110,6 +128,7 @@ class BackendConfig:
         Returns:
             Dict mapping storage type to LightRAG class name
         """
+        # Full-stack backends (provide all storage types)
         if self.backend_type == BackendType.JSON:
             return {
                 "kv_storage": "JsonKVStorage",
@@ -130,6 +149,49 @@ class BackendConfig:
                 "vector_storage": "MongoVectorDBStorage",
                 "graph_storage": "MongoGraphStorage",
                 "doc_status_storage": "MongoDocStatusStorage",
+            }
+        # Specialized backends (provide specific storage types, pair with others)
+        elif self.backend_type == BackendType.NEO4J:
+            return {
+                "kv_storage": "JsonKVStorage",
+                "vector_storage": "NanoVectorDBStorage",
+                "graph_storage": "Neo4JStorage",
+                "doc_status_storage": "JsonDocStatusStorage",
+            }
+        elif self.backend_type == BackendType.MILVUS:
+            return {
+                "kv_storage": "JsonKVStorage",
+                "vector_storage": "MilvusVectorDBStorage",
+                "graph_storage": "NetworkXStorage",
+                "doc_status_storage": "JsonDocStatusStorage",
+            }
+        elif self.backend_type == BackendType.QDRANT:
+            return {
+                "kv_storage": "JsonKVStorage",
+                "vector_storage": "QdrantVectorDBStorage",
+                "graph_storage": "NetworkXStorage",
+                "doc_status_storage": "JsonDocStatusStorage",
+            }
+        elif self.backend_type == BackendType.FAISS:
+            return {
+                "kv_storage": "JsonKVStorage",
+                "vector_storage": "FaissVectorDBStorage",
+                "graph_storage": "NetworkXStorage",
+                "doc_status_storage": "JsonDocStatusStorage",
+            }
+        elif self.backend_type == BackendType.REDIS:
+            return {
+                "kv_storage": "RedisKVStorage",
+                "vector_storage": "NanoVectorDBStorage",
+                "graph_storage": "NetworkXStorage",
+                "doc_status_storage": "RedisDocStatusStorage",
+            }
+        elif self.backend_type == BackendType.MEMGRAPH:
+            return {
+                "kv_storage": "JsonKVStorage",
+                "vector_storage": "NanoVectorDBStorage",
+                "graph_storage": "MemgraphStorage",
+                "doc_status_storage": "JsonDocStatusStorage",
             }
         else:
             raise ValueError(f"Unsupported backend type: {self.backend_type}")

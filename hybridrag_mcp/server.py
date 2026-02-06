@@ -390,6 +390,86 @@ def extract_entity_seeds(result_text: str, max_seeds: int = 5) -> List[str]:
     return seeds[:max_seeds]
 
 
+def _mask_uri_credentials(uri: str) -> str:
+    """Mask password in any connection URI using proper URL parsing."""
+    try:
+        import urllib.parse
+        parsed = urllib.parse.urlparse(uri)
+        if parsed.password:
+            port_part = f":{parsed.port}" if parsed.port else ""
+            masked_netloc = f"{parsed.username}:***@{parsed.hostname}{port_part}"
+            masked = parsed._replace(netloc=masked_netloc)
+            return urllib.parse.urlunparse(masked)
+    except Exception:
+        pass
+    return uri
+
+
+def get_backend_metadata_line() -> str:
+    """Generate backend metadata string for tool response footers.
+
+    Supports ALL BackendType variants from LightRAG:
+    json, postgres, mongodb, neo4j, milvus, qdrant, faiss, redis, memgraph.
+    Always shows the database path and active backend with connection details.
+    """
+    db_path = str(DATABASE_PATH)
+
+    if BACKEND_CONFIG is None:
+        return f"_Database: `{db_path}` | Backend: json (default - no config loaded)_"
+
+    bt = BACKEND_CONFIG.backend_type
+    opts = BACKEND_CONFIG.extra_options
+
+    if bt == BackendType.JSON:
+        detail = "json (flat-file)"
+
+    elif bt == BackendType.POSTGRESQL:
+        detail = (
+            f"postgres ({BACKEND_CONFIG.postgres_host}:"
+            f"{BACKEND_CONFIG.postgres_port}/"
+            f"{BACKEND_CONFIG.postgres_database})"
+        )
+
+    elif bt == BackendType.MONGODB:
+        detail = "mongodb"
+        conn = BACKEND_CONFIG.connection_string or opts.get("mongo_uri")
+        if conn:
+            detail += f" ({_mask_uri_credentials(conn)})"
+
+    elif bt == BackendType.NEO4J:
+        uri = os.environ.get("NEO4J_URI") or opts.get("neo4j_uri", "")
+        detail = f"neo4j ({uri})" if uri else "neo4j"
+
+    elif bt == BackendType.MILVUS:
+        host = os.environ.get("MILVUS_HOST") or opts.get("milvus_host", "")
+        port = os.environ.get("MILVUS_PORT") or opts.get("milvus_port", "")
+        if host:
+            detail = f"milvus ({host}:{port})" if port else f"milvus ({host})"
+        else:
+            detail = "milvus"
+
+    elif bt == BackendType.QDRANT:
+        url = os.environ.get("QDRANT_URL") or opts.get("qdrant_url", "")
+        detail = f"qdrant ({url})" if url else "qdrant"
+
+    elif bt == BackendType.FAISS:
+        detail = "faiss (local)"
+
+    elif bt == BackendType.REDIS:
+        uri = os.environ.get("REDIS_URI") or opts.get("redis_uri", "")
+        detail = f"redis ({_mask_uri_credentials(uri)})" if uri else "redis"
+
+    elif bt == BackendType.MEMGRAPH:
+        uri = os.environ.get("MEMGRAPH_URI") or opts.get("memgraph_uri", "")
+        detail = f"memgraph ({uri})" if uri else "memgraph"
+
+    else:
+        # Catch-all for any future BackendType additions
+        detail = f"{bt.value}"
+
+    return f"_Database: `{db_path}` | Backend: {detail}_"
+
+
 # =============================================================================
 # TIER 1: RECON TOOLS (Instant - <5s)
 # =============================================================================
@@ -438,6 +518,10 @@ async def hybridrag_database_status() -> str:
             lines.append("**Storage Details:**")
             for name, size in stats['storage_info'].items():
                 lines.append(f"  - {name}: {size}")
+
+        lines.append("")
+        lines.append("---")
+        lines.append(get_backend_metadata_line())
 
         return "\n".join(lines)
 
@@ -488,6 +572,10 @@ async def hybridrag_health_check() -> str:
         if 'error' in health:
             lines.append("")
             lines.append(f"**Error:** {health['error']}")
+
+        lines.append("")
+        lines.append("---")
+        lines.append(get_backend_metadata_line())
 
         return "\n".join(lines)
 
@@ -688,6 +776,7 @@ async def hybridrag_local_query(
 
         response = result.result
         response += f"\n\n---\n_Mode: local | Tier: 2 | Time: {result.execution_time:.2f}s | Trace: {trace_id}_"
+        response += f"\n{get_backend_metadata_line()}"
         if was_capped:
             response += "\n_Note: top_k capped at 10 for performance. Use hybrid_query for more depth._"
         if seeds:
@@ -763,6 +852,7 @@ async def hybridrag_extract_context(
 
         response = context
         response += f"\n\n---\n_Mode: {mode} (context only) | Trace: {trace_id}_"
+        response += f"\n{get_backend_metadata_line()}"
         if was_capped:
             response += "\n_Note: top_k capped at 15 for performance._"
 
@@ -868,6 +958,7 @@ async def hybridrag_global_query(
 
         response = result.result
         response += f"\n\n---\n_Mode: global | Tier: 3 | Time: {result.execution_time:.2f}s | Trace: {trace_id}_"
+        response += f"\n{get_backend_metadata_line()}"
         if was_capped:
             response += "\n_Note: top_k capped at 15 for performance._"
         if seeds:
@@ -982,6 +1073,7 @@ async def hybridrag_hybrid_query(
 
         response = result.result
         response += f"\n\n---\n_Mode: hybrid | Tier: 3 | Time: {result.execution_time:.2f}s | Trace: {trace_id}_"
+        response += f"\n{get_backend_metadata_line()}"
         if was_capped:
             response += "\n_Note: top_k capped at 15 for performance._"
         if seeds:
@@ -1099,6 +1191,7 @@ async def hybridrag_query(
         response = result.result
         if not context_only:
             response += f"\n\n---\n_Query mode: {mode} | Tier: 3 | Execution time: {result.execution_time:.2f}s | Trace: {trace_id}_"
+            response += f"\n{get_backend_metadata_line()}"
             if was_capped:
                 response += "\n_Note: top_k capped at 20 for performance._"
 
@@ -1285,6 +1378,7 @@ async def hybridrag_multihop_query(
             response += f"\n\n---\n**Reasoning Trace:**\n{result['reasoning_trace']}"
 
         response += f"\n\n---\n_Mode: multihop | Tier: 4 | Steps: {result.get('steps_taken', 'unknown')} | Time: {result.get('execution_time', 0):.2f}s | Trace: {trace_id}_"
+        response += f"\n{get_backend_metadata_line()}"
         if context_seeds:
             response += f"\n_Used context seeds: {context_seeds}_"
 

@@ -109,6 +109,7 @@ class HybridRAGCLI:
 
         # Handle --db flag for named database references
         self._db_entry = None
+        self._backend_config = None  # Backend config from registry (auto-resolved)
         db_name = getattr(args, 'db', None)
 
         if db_name:
@@ -117,12 +118,26 @@ class HybridRAGCLI:
             if db_entry:
                 self._db_entry = db_entry
                 self.working_dir = db_entry.path
-                # Use database's model if set and no CLI override
+                # Auto-load backend config from registry
+                self._backend_config = db_entry.get_backend_config()
+                logger.info(f"Registry '{db_entry.name}': backend={self._backend_config.backend_type.value}")
+                # Model priority: CLI > model_config (registry) > db_entry.model > env > default
                 cli_model = getattr(args, 'model', None)
-                if not cli_model and db_entry.model:
+                model_config = db_entry.get_model_config()
+                if cli_model:
+                    self.llm_model = cli_model
+                elif model_config and model_config.get('llm_model'):
+                    self.llm_model = model_config['llm_model']
+                elif db_entry.model:
                     self.llm_model = db_entry.model
                 else:
-                    self.llm_model = cli_model if cli_model else os.getenv("LIGHTRAG_MODEL", "azure/gpt-5.1")
+                    self.llm_model = os.getenv("LIGHTRAG_MODEL", "azure/gpt-5.1")
+                # Apply API keys from registry model_config
+                if model_config and model_config.get('api_keys'):
+                    for key_name, key_value in model_config['api_keys'].items():
+                        env_key = f"{key_name.upper()}_API_KEY"
+                        if key_value and not os.environ.get(env_key):
+                            os.environ[env_key] = key_value
             else:
                 # Treat as path fallback
                 self.working_dir = working_dir
@@ -131,6 +146,23 @@ class HybridRAGCLI:
             self.working_dir = args.working_dir if hasattr(args, 'working_dir') else "./lightrag_db"
             # Model override support: CLI > env var > default
             self.llm_model = args.model if hasattr(args, 'model') and args.model else os.getenv("LIGHTRAG_MODEL", "azure/gpt-5.1")
+
+            # Auto-resolve backend config from registry by path matching
+            # This ensures even without --db, the correct backend is used
+            try:
+                registry = get_registry()
+                resolved_path = str(Path(self.working_dir).expanduser().resolve())
+                for entry in registry.list_all():
+                    if entry.path and str(Path(entry.path).resolve()) == resolved_path:
+                        self._db_entry = entry
+                        self._backend_config = entry.get_backend_config()
+                        logger.info(
+                            f"Auto-resolved registry entry '{entry.name}' for path {resolved_path}: "
+                            f"backend={self._backend_config.backend_type.value}"
+                        )
+                        break
+            except Exception as e:
+                logger.debug(f"Registry auto-resolve failed (non-fatal): {e}")
 
         self.embed_model = args.embed_model if hasattr(args, 'embed_model') and args.embed_model else os.getenv("LIGHTRAG_EMBED_MODEL", "azure/text-embedding-3-small")
 
@@ -593,10 +625,24 @@ class HybridRAGCLI:
                     key, value = item.split('=', 1)
                     extra_metadata[key] = value
 
+        # Display backend info from registry
+        backend_label = "json (default)"
+        if self._backend_config:
+            backend_label = self._backend_config.backend_type.value
+            if self._backend_config.backend_type.value == "postgres":
+                backend_label += (
+                    f" ({self._backend_config.postgres_host}:"
+                    f"{self._backend_config.postgres_port}/"
+                    f"{self._backend_config.postgres_database})"
+                )
+
         print("\n🚀 Starting ingestion:")
         print(f"   Folders: {', '.join(folders)}")
         print(f"   Recursive: {recursive}")
         print(f"   Database: {self.working_dir}")
+        print(f"   Backend: {backend_label}")
+        if self._db_entry:
+            print(f"   Registry: {self._db_entry.name}")
         if extra_metadata:
             print(f"   Metadata: {extra_metadata}")
 
@@ -706,8 +752,14 @@ class HybridRAGCLI:
                                'httpx', 'httpcore', 'openai']:
                 logging.getLogger(logger_name).setLevel(logging.WARNING)
 
-        # Initialize components
-        lightrag_core = create_lightrag_core(config)
+        # Initialize components with backend config from registry (if available)
+        if self._backend_config:
+            backend_type = self._backend_config.backend_type.value
+            print(f"   🔧 Backend: {backend_type} (from registry)")
+            lightrag_core = create_lightrag_core(config, backend_config=self._backend_config)
+        else:
+            print("   🔧 Backend: json (default - no registry config)")
+            lightrag_core = create_lightrag_core(config)
 
         # Step 1: Discover and queue files using FolderWatcher
         watcher = FolderWatcher(config)
@@ -1397,7 +1449,7 @@ class HybridRAGCLI:
                             filename = Path(item.get('path', 'Unknown')).name
                             chunks = item.get('chunks', 0)
                             print(f"   ✓ {ts}  {filename} ({chunks} chunks)")
-            except Exception as e:
+            except Exception:
                 pass  # Silently skip if can't read
 
         # Type-specific config
@@ -2043,7 +2095,6 @@ class HybridRAGCLI:
             DatabaseBackup,
             MigrationCheckpoint,
             MigrationJob,
-            MigrationVerifier,
             StagedMigration,
         )
 
@@ -2776,7 +2827,7 @@ class HybridRAGCLI:
             print(f"  ... and {len(files_to_delete) - 10} more")
 
         if dry_run:
-            print(f"\n💡 Run without --dry-run to delete these files")
+            print("\n💡 Run without --dry-run to delete these files")
             return
 
         # Delete files
