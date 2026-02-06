@@ -25,7 +25,7 @@ from enum import Enum
 import yaml
 
 # Import BackendType and BackendConfig for backend support
-from src.config.config import BackendType, BackendConfig
+from src.config.backend_config import BackendType, BackendConfig
 
 
 # Database naming pattern: alphanumeric + hyphens, must start/end with alphanumeric

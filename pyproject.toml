@@ -45,7 +45,19 @@ dev = [
     "mypy>=1.0.0",
 ]
 
-# No build system needed for script-only project
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project.scripts]
+hybridrag = "hybridrag:main"
+
+[tool.setuptools]
+py-modules = ["hybridrag"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*", "hybridrag_mcp*"]
 
 [dependency-groups]
 dev = [

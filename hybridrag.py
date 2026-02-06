@@ -44,7 +44,7 @@ load_dotenv()
 
 # Import metadata manager
 # Import backend configuration for status command
-from src.config.config import BackendConfig
+from src.config.backend_config import BackendConfig
 from src.database_metadata import DatabaseMetadata, list_all_databases
 
 # Import database registry
@@ -226,7 +226,7 @@ class HybridRAGCLI:
 
     async def run_interactive(self):
         """Run interactive query interface with retrieval."""
-        from config.config import HybridRAGConfig
+        from config.app_config import HybridRAGConfig
         from src.lightrag_core import HybridLightRAGCore
 
         print("\n" + "="*70)
@@ -411,7 +411,7 @@ class HybridRAGCLI:
 
     async def _query_with_lightrag(self, query_text: str, mode: str, agentic: bool):
         """Execute query using LightRAG with LiteLLM integration."""
-        from config.config import HybridRAGConfig
+        from config.app_config import HybridRAGConfig
         from src.lightrag_core import HybridLightRAGCore
 
         # Initialize config with CLI overrides
@@ -438,7 +438,7 @@ class HybridRAGCLI:
 
     async def _query_with_multihop(self, query_text: str, verbose: bool = False):
         """Execute query using multi-hop reasoning with LightRAG tools."""
-        from config.config import HybridRAGConfig
+        from config.app_config import HybridRAGConfig
         from src.lightrag_core import HybridLightRAGCore
 
         print("🧠 Using multi-hop reasoning with LightRAG tools...")
@@ -736,7 +736,7 @@ class HybridRAGCLI:
 
     async def _ingest_single_process(self, folders: List[str], recursive: bool, quiet_mode: bool = False):
         """Run ingestion in single process (batch mode - process once and exit)."""
-        from config.config import load_config
+        from config.app_config import load_config
         from src.folder_watcher import FolderWatcher
         from src.ingestion_pipeline import IngestionPipeline
         from src.lightrag_core import create_lightrag_core
@@ -804,7 +804,7 @@ class HybridRAGCLI:
 
     async def _ingest_multiprocess(self, folders: List[str], recursive: bool):
         """Run ingestion with multiprocess architecture."""
-        from config.config import load_config
+        from config.app_config import load_config
         from src.process_manager import ProcessManager
 
         config = load_config(self.config_path)
@@ -2089,7 +2089,7 @@ class HybridRAGCLI:
         """
         from pathlib import Path
 
-        from src.config.config import BackendConfig
+        from src.config.backend_config import BackendConfig
         from src.database_registry import get_registry
         from src.migration import (
             DatabaseBackup,

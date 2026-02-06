@@ -46,9 +46,9 @@ load_dotenv(override=True)  # Force project .env to override system vars
 
 from fastmcp import FastMCP, Context
 from src.lightrag_core import HybridLightRAGCore
-from config.config import HybridRAGConfig
+from src.config.app_config import HybridRAGConfig
 from src.database_registry import DatabaseRegistry
-from src.config.config import BackendConfig, BackendType
+from src.config.backend_config import BackendConfig, BackendType
 
 # Import diagnostic logging module
 from hybridrag_mcp.diagnostic_logging import (

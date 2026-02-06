@@ -14,7 +14,7 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
-from config.config import load_config
+from src.config.app_config import load_config
 from src.process_manager import ProcessManager
 from src.lightrag_core import create_lightrag_core
 

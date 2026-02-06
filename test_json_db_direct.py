@@ -15,9 +15,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 # Set environment variables
 os.environ.setdefault("HYBRIDRAG_DATABASE", str(Path(__file__).parent / "lightrag_db"))
 
-from config.config import HybridRAGConfig
+from src.config.app_config import HybridRAGConfig
 from src.lightrag_core import HybridLightRAGCore
-from src.config.config import BackendConfig, BackendType
+from src.config.backend_config import BackendConfig, BackendType
 
 async def test_json_database():
     """Test direct query against JSON database."""

@@ -37,7 +37,7 @@ import psutil
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.alerting import get_alert_manager
-from src.config.config import BackendType
+from src.config.backend_config import BackendType
 from src.database_metadata import DatabaseMetadata
 from src.database_registry import (
     DatabaseEntry,
@@ -829,7 +829,7 @@ class WatcherDaemon:
 
         if self._core is None:
             logger.info("Lazy-initializing LightRAG core (first use)...")
-            from config.config import HybridRAGConfig
+            from src.config.app_config import HybridRAGConfig
             from src.lightrag_core import HybridLightRAGCore
 
             self._config = HybridRAGConfig()

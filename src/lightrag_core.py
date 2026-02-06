@@ -14,7 +14,7 @@ import random
 import re
 from collections import OrderedDict
 from pathlib import Path
-from typing import Dict, List, Optional, Literal, Union, Any, Set, Type
+from typing import Dict, List, Optional, Literal, Union, Any, Set
 from dataclasses import dataclass
 from lightrag import LightRAG, QueryParam
 from lightrag.utils import EmbeddingFunc
@@ -22,7 +22,7 @@ import litellm
 from dotenv import load_dotenv
 
 # Import backend configuration
-from src.config.config import BackendType, BackendConfig
+from src.config.backend_config import BackendType, BackendConfig
 
 # Load environment variables
 load_dotenv()
@@ -414,7 +414,7 @@ class HybridLightRAGCore:
         else:
             # For OpenAI/other providers - set OpenAI key and ensure Azure params don't leak
             os.environ['OPENAI_API_KEY'] = self.api_key
-            logger.info(f"Configured LiteLLM for OpenAI: using OPENAI_API_KEY")
+            logger.info("Configured LiteLLM for OpenAI: using OPENAI_API_KEY")
     
     def _ensure_working_dir(self):
         """Ensure working directory exists."""
