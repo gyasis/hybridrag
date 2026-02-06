@@ -81,7 +81,7 @@ lightrag_db_project3/    ← Isolated database
 
 **Query specific database**:
 ```bash
-LIGHTRAG_WORKING_DIR="./lightrag_db_project1" python hybridrag.py interactive
+LIGHTRAG_WORKING_DIR="./lightrag_db_project1" hybridrag interactive
 ```
 
 **Use Cases**:
@@ -195,7 +195,7 @@ python scripts/folder_to_lightrag.py --folder ./data
 
 **Note**: For most use cases, prefer the unified entry point:
 ```bash
-python hybridrag.py ingest --folder ./data
+hybridrag ingest --folder ./data
 ```
 
 ---
@@ -211,7 +211,7 @@ cd hybridrag
 
 # 2. Install dependencies
 source .venv/bin/activate
-pip install -r requirements.txt
+uv sync && uv pip install -e .
 
 # 3. Ingest all .specstory folders
 ./scripts/ingest_specstory_folders.sh /home/gyasis/Documents/code fresh

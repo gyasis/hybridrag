@@ -34,25 +34,34 @@ A comprehensive knowledge graph-based retrieval system that combines folder watc
 
 ## 📋 Prerequisites
 
-- Python 3.8+
+- Python 3.10+ (3.12 recommended)
+- [uv](https://docs.astral.sh/uv/) package manager (recommended) or pip
 - Azure API key (preferred) or OpenAI API key
+- Docker (for PostgreSQL backend)
 - Optional: Other LLM provider keys (Anthropic, Gemini) for alternative models
 
 ## 🛠️ Installation
 
-1. **Clone or create the project directory**:
+1. **Clone the repository**:
 ```bash
-mkdir hybridrag && cd hybridrag
+git clone <repo-url> hybridrag && cd hybridrag
 ```
 
-2. **Install dependencies**:
+2. **Install with uv (recommended)**:
 ```bash
-pip install -r requirements.txt
+uv sync                    # Creates .venv + installs all deps
+uv pip install -e .        # Install CLI entry point
 ```
 
-3. **Install PromptChain** (for agentic features):
+Or with pip:
 ```bash
-pip install git+https://github.com/gyasis/PromptChain.git
+python -m venv .venv && source .venv/bin/activate
+pip install -e .           # Installs all deps + CLI
+```
+
+3. **Verify CLI**:
+```bash
+hybridrag --help           # Should show all commands
 ```
 
 4. **Setup environment**:
@@ -61,39 +70,58 @@ cp .env.example .env
 # Edit .env and add your API keys
 ```
 
+5. **Setup PostgreSQL backend** (recommended for production):
+```bash
+docker run -d \
+  --name hybridrag-postgres \
+  -e POSTGRES_USER=hybridrag \
+  -e POSTGRES_PASSWORD=hybridrag_secure_2026 \
+  -e POSTGRES_DB=hybridrag \
+  -p 5433:5432 \
+  apache/age:latest
+```
+> **Note**: Uses port 5433 (not 5432) to avoid conflicts with existing PostgreSQL instances. The `apache/age` image includes pgvector for embeddings and Apache AGE for graph queries.
+
 ## 🎯 Quick Start
 
 ### 1. First-Time Setup
 ```bash
-# Activate environment
-source .venv/bin/activate  # or: uv run
-
-# Check database status
-python hybridrag.py check-db
+# Register a database (PostgreSQL backend)
+hybridrag db register mydb \
+  --path ./lightrag_db \
+  --source ~/data \
+  --type filesystem \
+  --auto-watch
 
 # Ingest data
-python hybridrag.py ingest --folder ./data
+hybridrag --db mydb ingest --folder ./data
+
+# Check database status
+hybridrag --db mydb status
 ```
 
 ### 2. Query Your Data
 ```bash
 # Interactive mode (recommended)
-python hybridrag.py interactive
+hybridrag --db mydb interactive
 
 # One-shot query
-python hybridrag.py query --text "Find appointment tables" --mode hybrid
+hybridrag --db mydb query --text "Find appointment tables" --mode hybrid
 
 # Advanced query with multi-hop reasoning
-python hybridrag.py query --text "..." --agentic --use-promptchain
+hybridrag --db mydb query --text "..." --multihop --verbose
 ```
 
 ### 3. Manage Your System
 ```bash
 # Check status
-python hybridrag.py status
+hybridrag --db mydb status
 
 # Database info
-python hybridrag.py check-db
+hybridrag --db mydb check-db
+
+# Start watcher (auto-ingest new files)
+hybridrag --db mydb db watch start
 ```
 
 ## 📖 Comprehensive Usage
@@ -109,24 +137,23 @@ See [USAGE.md](docs/guides/USAGE.md) for complete documentation including:
 
 ```bash
 # Ingestion
-python hybridrag.py ingest --folder ./data
-python hybridrag.py ingest --folder ./data --db-action fresh  # Start fresh
-python hybridrag.py ingest --folder ./data --db-action add    # Add to existing
+hybridrag --db mydb ingest --folder ./data
+hybridrag --db mydb ingest --folder ./data --db-action fresh  # Start fresh
+hybridrag --db mydb ingest --folder ./data --db-action add    # Add to existing
 
 # Ingestion with metadata and scripting flags
-python hybridrag.py ingest --folder ./data --metadata "project=myproject" --yes --quiet
+hybridrag --db mydb ingest --folder ./data --metadata "project=myproject" --yes --quiet
 
 # Queries
-python hybridrag.py interactive                               # Interactive CLI
-python hybridrag.py query --text "..." --mode hybrid         # One-shot query
-python hybridrag.py query --text "..." --agentic             # Multi-hop reasoning
+hybridrag --db mydb interactive                               # Interactive CLI
+hybridrag --db mydb query --text "..." --mode hybrid         # One-shot query
+hybridrag --db mydb query --text "..." --multihop            # Multi-hop reasoning
 
 # Management
-python hybridrag.py status                                    # System status
-python hybridrag.py check-db                                  # Database info
-python hybridrag.py db-info                                   # Detailed database info with sources
-python hybridrag.py list-dbs                                  # List all databases
-python hybridrag.py --help                                    # Show help
+hybridrag --db mydb status                                    # System status
+hybridrag --db mydb check-db                                  # Database info
+hybridrag db list                                             # List all databases
+hybridrag --help                                              # Show help
 ```
 
 ## 📚 Database Registry
@@ -142,45 +169,45 @@ HybridRAG includes a centralized database registry for managing multiple knowled
 
 ```bash
 # Register a new database
-python hybridrag.py db register specstory \
+hybridrag db register specstory \
     --path ~/databases/specstory_db \
-    --source ~/dev/jira-issues \
+    --source ~/dev \
     --type specstory \
     --auto-watch \
     --interval 300 \
-    --model azure/gpt-4o
+    --model azure/gpt-5.1
 
 # List all registered databases
-python hybridrag.py db list
-python hybridrag.py db list --json
+hybridrag db list
+hybridrag db list --json
 
 # Show database details
-python hybridrag.py db show specstory
+hybridrag db show specstory
 
 # Update database settings
-python hybridrag.py db update specstory --auto-watch false --interval 600
+hybridrag db update specstory --auto-watch false --interval 600
 
 # Remove from registry (doesn't delete files)
-python hybridrag.py db unregister specstory
+hybridrag db unregister specstory
 
 # Force sync/re-ingest from source folder
-python hybridrag.py db sync specstory
-python hybridrag.py db sync specstory --fresh  # Start fresh
+hybridrag db sync specstory
+hybridrag db sync specstory --fresh  # Start fresh
 ```
 
 ### Using Named Databases
 
-Once registered, reference databases by name with `--db`:
+Once registered, reference databases by name with `--db`. The registry auto-resolves backend configuration (PostgreSQL, JSON, etc.) from `~/.hybridrag/registry.yaml`:
 
 ```bash
-# Query using database name
-python hybridrag.py --db specstory query --text "TIC-4376 progress"
+# Query using database name (backend auto-resolved)
+hybridrag --db specstory query --text "TIC-4376 progress"
 
 # Ingest additional data
-python hybridrag.py --db specstory ingest --folder ~/more-data
+hybridrag --db specstory ingest --folder ~/more-data
 
-# Check status
-python hybridrag.py --db specstory status
+# Check status (shows backend type)
+hybridrag --db specstory status
 ```
 
 ### File Watching
@@ -189,17 +216,17 @@ HybridRAG can automatically watch source folders and ingest new/changed files:
 
 ```bash
 # Start watcher for a database
-python hybridrag.py db watch start specstory
+hybridrag --db specstory db watch start
 
 # Start watchers for ALL auto-watch databases
-python hybridrag.py db watch start --all
+hybridrag db watch start --all
 
 # Stop watcher
-python hybridrag.py db watch stop specstory
-python hybridrag.py db watch stop --all
+hybridrag --db specstory db watch stop
+hybridrag db watch stop --all
 
 # Check watcher status
-python hybridrag.py db watch status
+hybridrag db watch status
 ```
 
 #### Systemd Integration (Linux)
@@ -208,7 +235,7 @@ For persistent watchers that survive reboots:
 
 ```bash
 # Start with systemd (creates user service)
-python hybridrag.py db watch start specstory --systemd
+hybridrag --db specstory db watch start --systemd
 
 # Or manually install the template unit
 cp scripts/hybridrag-watcher@.service ~/.config/systemd/user/
@@ -229,11 +256,10 @@ The registry supports different source types with type-specific configurations:
 
 Example SpecStory registration:
 ```bash
-python hybridrag.py db register specstory \
+hybridrag db register specstory \
     --path ~/databases/specstory_db \
-    --source ~/dev/jira-issues \
+    --source ~/dev \
     --type specstory \
-    --jira-project TIC \
     --auto-watch
 ```
 
@@ -289,7 +315,9 @@ Features:
 
 ## ⚙️ Configuration
 
-The system uses a hierarchical configuration in `config/config.py`:
+The system uses a hierarchical configuration split across two files:
+- `src/config/app_config.py` — Application settings (LightRAG, ingestion, search)
+- `src/config/backend_config.py` — Backend connection settings (PostgreSQL, JSON, etc.)
 
 ### LightRAG Configuration
 ```python
@@ -305,15 +333,22 @@ class LightRAGConfig:
 **Model Override**: You can override models at runtime:
 ```bash
 # Use Gemini instead of Azure
-python hybridrag.py --model gemini/gemini-pro ingest --folder ./data
+hybridrag --model gemini/gemini-pro --db mydb ingest --folder ./data
 
 # Use Anthropic Claude
-python hybridrag.py --model anthropic/claude-opus query --text "your query"
+hybridrag --model anthropic/claude-opus --db mydb query --text "your query"
 
 # Set via environment variable
-export LIGHTRAG_MODEL="openai/gpt-4o"
-python hybridrag.py interactive
+export DEPLOYMENT_MODEL="openai/gpt-4o"
+hybridrag --db mydb interactive
 ```
+
+**Model Precedence Chain** (highest to lowest):
+1. CLI `--model` flag
+2. `model_config.yaml` file
+3. Registry `model_config.llm_model`
+4. `DEPLOYMENT_MODEL` env var
+5. `gpt-4o-mini` (default fallback)
 
 ### Ingestion Configuration
 ```python
@@ -353,19 +388,19 @@ HybridRAG supports six query modes for different retrieval needs:
 
 ```bash
 # Native LightRAG modes
-python hybridrag.py query --text "APPOINTMENT table" --mode local
-python hybridrag.py query --text "billing overview" --mode global
-python hybridrag.py query --text "patient flow" --mode hybrid
+hybridrag --db mydb query --text "APPOINTMENT table" --mode local
+hybridrag --db mydb query --text "billing overview" --mode global
+hybridrag --db mydb query --text "patient flow" --mode hybrid
 
 # Multi-hop reasoning (uses LightRAG as tools)
-python hybridrag.py query --text "Compare registration and billing workflows" --multihop
-python hybridrag.py query --text "Trace patient data flow" --multihop --verbose
+hybridrag --db mydb query --text "Compare registration and billing workflows" --multihop
+hybridrag --db mydb query --text "Trace patient data flow" --multihop --verbose
 ```
 
 ### Interactive Mode
 
 ```bash
-python hybridrag.py interactive
+hybridrag --db mydb interactive
 
 > :local                  # Switch to local mode
 > :multihop               # Enable multi-hop reasoning
@@ -421,13 +456,15 @@ HybridRAG includes a Model Context Protocol (MCP) server for seamless integratio
 
 ### Quick Setup
 
-1. **Find your Claude Desktop config** (typically `~/.claude_desktop/config.json`)
+1. **Find your Claude config**:
+   - Claude Desktop: `~/.claude_desktop/config.json`
+   - Claude Code: `~/.claude/settings.json` (mcpServers section)
 
-2. **Add HybridRAG server(s)**:
+2. **Add HybridRAG server**:
 ```json
 {
   "mcpServers": {
-    "hybridrag-notes": {
+    "hybridrag-specstory": {
       "command": "uv",
       "args": [
         "--directory",
@@ -438,14 +475,18 @@ HybridRAG includes a Model Context Protocol (MCP) server for seamless integratio
         "hybridrag_mcp"
       ],
       "env": {
-        "HYBRIDRAG_DATABASE": "/path/to/notes_lightrag_db"
+        "HYBRIDRAG_DATABASE": "/path/to/lightrag_db",
+        "AZURE_API_KEY": "${AZURE_API_KEY}",
+        "AZURE_API_BASE": "${AZURE_API_BASE}"
       }
     }
   }
 }
 ```
 
-3. **Restart Claude Desktop** to load the new server
+3. **Restart Claude** to load the new server
+
+The MCP server auto-resolves the backend from `~/.hybridrag/registry.yaml`. Every tool response includes backend metadata confirming which database and backend is active (e.g., `Backend: postgres (localhost:5433/hybridrag)`).
 
 ### Multiple Instances
 
@@ -454,19 +495,6 @@ Run multiple HybridRAG instances for different knowledge bases:
 ```json
 {
   "mcpServers": {
-    "hybridrag-notes": {
-      "command": "uv",
-      "args": ["--directory", "/path/to/hybridrag", "run", "python", "-m", "hybridrag_mcp"],
-      "env": { "HYBRIDRAG_DATABASE": "/path/to/notes_lightrag_db" }
-    },
-    "hybridrag-code": {
-      "command": "uv",
-      "args": ["--directory", "/path/to/hybridrag", "run", "python", "-m", "hybridrag_mcp"],
-      "env": {
-        "HYBRIDRAG_DATABASE": "/path/to/code_lightrag_db",
-        "HYBRIDRAG_MODEL": "azure/gpt-4o"
-      }
-    },
     "hybridrag-specstory": {
       "command": "uv",
       "args": ["--directory", "/path/to/hybridrag", "run", "python", "-m", "hybridrag_mcp"],
@@ -474,6 +502,14 @@ Run multiple HybridRAG instances for different knowledge bases:
         "HYBRIDRAG_DATABASE": "/path/to/specstory_lightrag_db",
         "AZURE_API_KEY": "${AZURE_API_KEY}",
         "AZURE_API_BASE": "${AZURE_API_BASE}"
+      }
+    },
+    "hybridrag-code": {
+      "command": "uv",
+      "args": ["--directory", "/path/to/hybridrag", "run", "python", "-m", "hybridrag_mcp"],
+      "env": {
+        "HYBRIDRAG_DATABASE": "/path/to/code_lightrag_db",
+        "HYBRIDRAG_MODEL": "azure/gpt-4o"
       }
     }
   }
@@ -509,51 +545,51 @@ See `hybridrag_mcp/claude_desktop_config.example.json` for a complete multi-inst
 
 ```
 hybridrag/
-├── hybridrag_mcp/            # MCP server for Claude Desktop
+├── hybridrag.py              # Main CLI entry point (installed as `hybridrag` command)
+├── pyproject.toml            # Dependencies, build config, CLI entry point
+├── .env                      # API keys (not committed)
+├── .env.example              # Environment template
+├── hybridrag_mcp/            # MCP server for Claude Desktop/Code
 │   ├── __init__.py           # Module metadata
 │   ├── __main__.py           # Entry point for python -m
-│   ├── server.py             # MCP server implementation
+│   ├── server.py             # 8 MCP tools with backend metadata
 │   └── claude_desktop_config.example.json
 ├── src/                      # Core system components
-│   ├── folder_watcher.py      # File monitoring system
-│   ├── ingestion_pipeline.py  # Document processing
-│   ├── lightrag_core.py       # LightRAG interface
+│   ├── config/
+│   │   ├── app_config.py      # HybridRAGConfig, LightRAGConfig, IngestionConfig
+│   │   ├── backend_config.py  # BackendType enum, BackendConfig
+│   │   └── __init__.py        # Re-exports from both config modules
+│   ├── database_registry.py   # Registry CRUD (~/.hybridrag/registry.yaml)
+│   ├── lightrag_core.py       # LightRAG interface wrapper
+│   ├── ingestion/
+│   │   ├── file_watcher.py    # Folder monitoring
+│   │   └── document_processor.py  # Multi-format parsing
 │   ├── search_interface.py    # Search functionality
-│   ├── process_manager.py     # Multiprocess orchestration
-│   └── status_display.py      # Status reporting
-├── config/
-│   └── config.py              # Configuration classes
-├── tests/                    # Test suite
-│   ├── test_hybridrag.py      # Integration tests
-│   ├── test_multiprocess.py   # Multiprocess tests
-│   └── ...                    # Additional tests
+│   └── health_check.py        # System health monitoring
 ├── scripts/                  # Utility scripts
-│   ├── deeplake_to_lightrag.py      # DeepLake ingestion
-│   ├── folder_to_lightrag.py        # Folder ingestion
-│   └── ...                          # Other utilities
-├── examples/                 # Example usage patterns
-│   ├── lightrag_query_demo.py       # Interactive demo
-│   ├── query_with_promptchain.py    # PromptChain examples
-│   └── ...                          # Quick tests
-├── legacy/                   # Deprecated entry points
-│   ├── main.py                # Old main script
-│   ├── simple_main.py         # Old simple version
-│   └── ...                    # Other old scripts
-├── memory-bank/             # Project documentation
-│   ├── projectbrief.md        # Project overview
-│   ├── progress.md            # Progress tracking
-│   └── ...                    # Additional docs
-├── data/                    # Default watch folder
-├── lightrag_db/            # LightRAG knowledge graph
-├── ingestion_queue/        # Processing queue
-├── hybridrag.py            # ⭐ Unified entry point
-├── USAGE.md                # Complete usage guide
-├── requirements.txt        # Dependencies
-├── .env.example            # Environment template
-└── README.md               # This file
+│   ├── hybridrag-watcher.py   # Watcher daemon (started by CLI)
+│   ├── ingest_specstory_folders.sh
+│   ├── watch_specstory_folders.sh
+│   └── README.md
+├── tests/                    # Test suite
+├── memory-bank/             # Project documentation (tracked in git)
+│   ├── projectbrief.md
+│   ├── activeContext.md
+│   ├── techContext.md
+│   ├── systemPatterns.md
+│   ├── progress.md
+│   ├── productContext.md
+│   └── CLAUDE.md
+├── docs/                    # Extended documentation
+│   └── user-stories/
+│       └── specstory-setup-guide.md  # Full SpecStory setup walkthrough
+├── lightrag_db/            # LightRAG working directory (PostgreSQL metadata)
+├── .last_specstory_watch   # Delta ingestion timestamp
+└── ~/.hybridrag/
+    └── registry.yaml       # Database registry (single source of truth)
 ```
 
-**Note:** Use `hybridrag.py` as the main entry point. Scripts in `legacy/` are deprecated.
+**Note:** Use the `hybridrag` CLI command (installed via `pip install -e .`). Scripts in `legacy/` are deprecated.
 
 ## 🚨 Error Handling
 
@@ -597,13 +633,14 @@ The system implements comprehensive error handling:
 Enable verbose logging:
 ```bash
 export HYBRIDRAG_LOG_LEVEL=DEBUG
-python main.py search
+hybridrag --db mydb interactive
 ```
 
 ### Health Checks
 Regular system health monitoring:
 ```bash
-python main.py status | jq '.health'
+hybridrag --db mydb status
+hybridrag db watch status
 ```
 
 ## 🤝 Contributing

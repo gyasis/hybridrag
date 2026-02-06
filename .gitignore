@@ -78,8 +78,6 @@ examples/
 # Runtime/local data
 ingestion_queue/*
 !ingestion_queue/.gitkeep
-memory-bank/
-
 # Local tool configs
 .claude/
 .specstory/
