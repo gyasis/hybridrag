@@ -1,0 +1,293 @@
+# Backend Configuration API Contract
+# Feature: 001-pluggable-db-backend
+# Date: 2025-12-19
+
+openapi: "3.0.3"
+info:
+  title: HybridRAG Backend Configuration API
+  version: "1.0.0"
+  description: |
+    Configuration schemas for HybridRAG storage backends.
+    These schemas define the structure for backend configuration
+    in the database registry and environment variables.
+
+components:
+  schemas:
+    BackendType:
+      type: string
+      enum:
+        - json
+        - postgres
+        - mongodb
+      default: json
+      description: |
+        Storage backend type selection.
+        - json: Default file-based storage (JSON + NanoVectorDB + NetworkX)
+        - postgres: PostgreSQL with pgvector and AGE extensions
+        - mongodb: MongoDB (future implementation)
+
+    BackendConfig:
+      type: object
+      description: Configuration for storage backend connection
+      properties:
+        backend_type:
+          $ref: '#/components/schemas/BackendType'
+
+        # PostgreSQL-specific settings
+        postgres_host:
+          type: string
+          default: localhost
+          description: PostgreSQL server hostname
+        postgres_port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+          default: 5432
+          description: PostgreSQL server port
+        postgres_user:
+          type: string
+          default: hybridrag
+          description: PostgreSQL username
+        postgres_password:
+          type: string
+          format: password
+          description: PostgreSQL password (from env or secrets)
+        postgres_database:
+          type: string
+          default: hybridrag
+          description: PostgreSQL database name
+        postgres_workspace:
+          type: string
+          default: default
+          description: Logical workspace for multi-tenant isolation
+        postgres_ssl_mode:
+          type: string
+          enum:
+            - disable
+            - require
+            - verify-ca
+            - verify-full
+          default: prefer
+          description: SSL/TLS mode for PostgreSQL connection
+        postgres_max_connections:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 10
+          description: Maximum connection pool size
+
+        # Alternative connection method
+        connection_string:
+          type: string
+          format: uri
+          pattern: "^postgresql://.*$"
+          description: |
+            PostgreSQL connection string (alternative to individual params).
+            Format: postgresql://user:pass@host:port/database
+
+        # Vector index configuration
+        vector_index_type:
+          type: string
+          enum:
+            - hnsw
+            - ivfflat
+          default: hnsw
+          description: Vector similarity index type
+        hnsw_m:
+          type: integer
+          minimum: 4
+          maximum: 64
+          default: 16
+          description: HNSW algorithm M parameter
+        hnsw_ef:
+          type: integer
+          minimum: 16
+          maximum: 256
+          default: 64
+          description: HNSW algorithm ef_construction parameter
+
+        # Extra options
+        extra_options:
+          type: object
+          additionalProperties: true
+          description: Backend-specific extra options
+
+    DatabaseEntry:
+      type: object
+      description: Extended database registry entry with backend configuration
+      required:
+        - name
+        - path
+      properties:
+        name:
+          type: string
+          description: Unique database identifier
+        path:
+          type: string
+          description: Path to database storage
+        source_folder:
+          type: string
+          nullable: true
+          description: Source folder for document ingestion
+        source_type:
+          type: string
+          default: filesystem
+          description: Type of source (filesystem, specstory, etc.)
+        auto_watch:
+          type: boolean
+          default: false
+          description: Enable automatic file watching
+        watch_interval:
+          type: integer
+          default: 300
+          description: Watch interval in seconds
+
+        # NEW: Backend configuration
+        backend_type:
+          $ref: '#/components/schemas/BackendType'
+        backend_config:
+          $ref: '#/components/schemas/BackendConfig'
+
+    MigrationStatus:
+      type: string
+      enum:
+        - pending
+        - in_progress
+        - completed
+        - failed
+        - paused
+      description: Status of a migration job
+
+    MigrationCheckpoint:
+      type: object
+      description: Checkpoint for resumable migration
+      properties:
+        store_name:
+          type: string
+          description: Name of the store being migrated
+        last_key:
+          type: string
+          nullable: true
+          description: Last successfully migrated key
+        migrated_count:
+          type: integer
+          description: Number of records migrated
+        total_count:
+          type: integer
+          description: Total records in source store
+
+    MigrationJob:
+      type: object
+      description: Migration job representation
+      required:
+        - job_id
+        - database_name
+        - source_backend
+        - target_backend
+      properties:
+        job_id:
+          type: string
+          description: Unique job identifier
+        database_name:
+          type: string
+          description: Database being migrated
+        source_backend:
+          $ref: '#/components/schemas/BackendType'
+        target_backend:
+          $ref: '#/components/schemas/BackendType'
+        status:
+          $ref: '#/components/schemas/MigrationStatus'
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+        checkpoints:
+          type: array
+          items:
+            $ref: '#/components/schemas/MigrationCheckpoint'
+        total_records:
+          type: integer
+          default: 0
+        migrated_records:
+          type: integer
+          default: 0
+        failed_records:
+          type: integer
+          default: 0
+        last_error:
+          type: string
+          nullable: true
+
+    StorageMetrics:
+      type: object
+      description: Storage statistics for backend status
+      properties:
+        backend_type:
+          $ref: '#/components/schemas/BackendType'
+        file_sizes:
+          type: object
+          additionalProperties:
+            type: integer
+          description: File sizes in bytes (JSON backend)
+        total_size_bytes:
+          type: integer
+          description: Total storage size
+        entity_count:
+          type: integer
+          description: Number of entities in graph
+        relation_count:
+          type: integer
+          description: Number of relationships in graph
+        chunk_count:
+          type: integer
+          description: Number of text chunks
+        doc_count:
+          type: integer
+          description: Number of documents
+        is_connected:
+          type: boolean
+          description: Backend connection status
+        connection_latency_ms:
+          type: number
+          nullable: true
+          description: Connection latency in milliseconds
+        warnings:
+          type: array
+          items:
+            type: string
+          description: Storage warnings (e.g., migration recommendations)
+
+# Environment Variables Contract
+x-environment-variables:
+  HYBRIDRAG_BACKEND_TYPE:
+    description: Default backend type for new databases
+    default: json
+    required: false
+  POSTGRES_HOST:
+    description: PostgreSQL server hostname
+    default: localhost
+    required: false
+  POSTGRES_PORT:
+    description: PostgreSQL server port
+    default: "5432"
+    required: false
+  POSTGRES_USER:
+    description: PostgreSQL username
+    default: hybridrag
+    required: false
+  POSTGRES_PASSWORD:
+    description: PostgreSQL password
+    required: true
+    sensitive: true
+  POSTGRES_DATABASE:
+    description: PostgreSQL database name
+    default: hybridrag
+    required: false
+  POSTGRES_WORKSPACE:
+    description: Logical workspace name for isolation
+    default: default
+    required: false

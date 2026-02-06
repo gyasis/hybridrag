@@ -1,0 +1,294 @@
+# CLI Commands API Contract
+# Feature: 001-pluggable-db-backend
+# Date: 2025-12-19
+
+openapi: "3.0.3"
+info:
+  title: HybridRAG Backend CLI Commands
+  version: "1.0.0"
+  description: |
+    CLI command specifications for backend management.
+    All commands support --json flag for machine-readable output.
+
+x-cli-commands:
+  backend:
+    description: Backend management commands
+    subcommands:
+      status:
+        description: Show backend status and storage metrics
+        usage: hybridrag backend status [DATABASE] [OPTIONS]
+        arguments:
+          database:
+            type: string
+            required: false
+            description: Database name (default: current active database)
+        options:
+          --json:
+            type: boolean
+            default: false
+            description: Output in JSON format
+          --verbose:
+            type: boolean
+            default: false
+            description: Include detailed file sizes and metrics
+        output:
+          human_readable: |
+            Database: specstory
+            Backend: json
+            Status: healthy
+
+            Storage Metrics:
+              Entities: 15,234
+              Relations: 45,678
+              Chunks: 8,901
+              Documents: 156
+
+            File Sizes:
+              vdb_relationships.json: 1.3 GB ⚠️
+              kv_store_llm_response_cache.json: 896 MB ⚠️
+              vdb_entities.json: 721 MB
+              vdb_chunks.json: 308 MB
+              graph.graphml: 118 MB
+              Total: 3.5 GB
+
+            ⚠️ Warning: Files exceed 500MB threshold.
+            Consider migrating to PostgreSQL: hybridrag migrate specstory --to postgres
+          json_schema:
+            $ref: '#/components/schemas/BackendStatusResponse'
+        exit_codes:
+          0: Success
+          1: Database not found
+          2: Backend connection failed
+
+      setup-docker:
+        description: Auto-provision PostgreSQL container with pgvector
+        usage: hybridrag backend setup-docker [OPTIONS]
+        options:
+          --port:
+            type: integer
+            default: 5432
+            description: Host port to bind PostgreSQL
+          --password:
+            type: string
+            description: PostgreSQL password (default: generated)
+          --volume:
+            type: string
+            description: Named volume for data persistence
+          --json:
+            type: boolean
+            default: false
+            description: Output in JSON format
+          --dry-run:
+            type: boolean
+            default: false
+            description: Show docker-compose without executing
+        output:
+          human_readable: |
+            Creating PostgreSQL container with pgvector...
+
+            Container: hybridrag-postgres
+            Image: pgvector/pgvector:pg16
+            Port: 5432
+            Volume: hybridrag-pgdata
+
+            Waiting for PostgreSQL to be ready... ✓
+
+            Connection details saved to registry.
+
+            To use this backend:
+              hybridrag db create mydb --backend postgres
+              hybridrag migrate existing_db --to postgres
+          json_schema:
+            $ref: '#/components/schemas/SetupDockerResponse'
+        exit_codes:
+          0: Success
+          1: Docker not available
+          2: Port already in use
+          3: Container creation failed
+
+  migrate:
+    description: Migrate database between storage backends
+    usage: hybridrag migrate DATABASE [OPTIONS]
+    arguments:
+      database:
+        type: string
+        required: true
+        description: Database name to migrate
+    options:
+      --from:
+        type: string
+        enum: [json, postgres, mongodb]
+        default: auto-detect
+        description: Source backend type
+      --to:
+        type: string
+        enum: [json, postgres, mongodb]
+        required: true
+        description: Target backend type
+      --connection-string:
+        type: string
+        description: PostgreSQL connection string (overrides registry)
+      --batch-size:
+        type: integer
+        default: 1000
+        description: Records per batch for migration
+      --resume:
+        type: boolean
+        default: false
+        description: Resume interrupted migration from checkpoint
+      --verify:
+        type: boolean
+        default: true
+        description: Verify record counts after migration
+      --json:
+        type: boolean
+        default: false
+        description: Output in JSON format
+      --dry-run:
+        type: boolean
+        default: false
+        description: Show migration plan without executing
+    output:
+      human_readable: |
+        Migration Plan:
+          Database: specstory
+          Source: json (3.5 GB, 69,813 records)
+          Target: postgres (hybridrag-postgres:5432)
+
+        Pausing watcher... ✓
+        Backing up JSON files... ✓
+
+        Migrating stores:
+          [1/6] kv_store_full_docs: 156 records ✓
+          [2/6] kv_store_text_chunks: 8,901 records ✓
+          [3/6] kv_store_llm_response_cache: 12,345 records ✓
+          [4/6] vdb_chunks: 8,901 embeddings ✓
+          [5/6] vdb_entities: 15,234 embeddings ✓
+          [6/6] vdb_relationships: 45,678 embeddings ✓
+
+        Migrating graph...
+          Nodes: 15,234 ✓
+          Edges: 45,678 ✓
+
+        Verifying migration...
+          Record counts match ✓
+          Sample queries pass ✓
+
+        Updating registry... ✓
+        Resuming watcher with postgres backend... ✓
+
+        Migration completed in 18m 32s
+        Memory reduction: 3.5 GB → ~200 MB (estimated)
+      json_schema:
+        $ref: '#/components/schemas/MigrationResponse'
+    exit_codes:
+      0: Success
+      1: Database not found
+      2: Source backend error
+      3: Target backend error
+      4: Verification failed
+      5: Migration interrupted (checkpoint saved)
+
+  db:
+    description: Database management (extended)
+    subcommands:
+      create:
+        description: Create new database with backend selection
+        usage: hybridrag db create NAME [OPTIONS]
+        arguments:
+          name:
+            type: string
+            required: true
+            description: Database name
+        options:
+          --backend:
+            type: string
+            enum: [json, postgres]
+            default: json
+            description: Storage backend type
+          --connection-string:
+            type: string
+            description: PostgreSQL connection string (for postgres backend)
+          --workspace:
+            type: string
+            description: PostgreSQL workspace name for isolation
+          --path:
+            type: string
+            description: Path for JSON backend storage
+          --json:
+            type: boolean
+            default: false
+            description: Output in JSON format
+        exit_codes:
+          0: Success
+          1: Database already exists
+          2: Invalid backend configuration
+          3: Backend connection failed
+
+components:
+  schemas:
+    BackendStatusResponse:
+      type: object
+      properties:
+        database:
+          type: string
+        backend_type:
+          type: string
+        status:
+          type: string
+          enum: [healthy, degraded, error]
+        metrics:
+          $ref: 'backend-config.yaml#/components/schemas/StorageMetrics'
+        warnings:
+          type: array
+          items:
+            type: string
+
+    SetupDockerResponse:
+      type: object
+      properties:
+        container_name:
+          type: string
+        image:
+          type: string
+        port:
+          type: integer
+        volume:
+          type: string
+        connection_string:
+          type: string
+        status:
+          type: string
+          enum: [running, starting, failed]
+
+    MigrationResponse:
+      type: object
+      properties:
+        job_id:
+          type: string
+        database:
+          type: string
+        source_backend:
+          type: string
+        target_backend:
+          type: string
+        status:
+          type: string
+          enum: [completed, failed, paused]
+        duration_seconds:
+          type: number
+        records_migrated:
+          type: integer
+        records_failed:
+          type: integer
+        verification:
+          type: object
+          properties:
+            record_counts_match:
+              type: boolean
+            sample_queries_pass:
+              type: boolean
+        checkpoint_file:
+          type: string
+          nullable: true
+          description: Path to checkpoint file if migration was interrupted
