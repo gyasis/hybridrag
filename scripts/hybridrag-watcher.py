@@ -490,10 +490,15 @@ class WatcherDaemon:
         self.batch_config = BatchConfig()
         self.resource_monitor = ResourceMonitor(self.batch_config)
 
-        # Dual-queue priority architecture: realtime (high-priority) + bulk (background)
-        # asyncio.Queue / Lock are safe to construct outside an event loop in Python 3.10+
+        # Three-worker priority architecture:
+        #   1. realtime_watch_worker  — highest priority, full ainsert()
+        #   2. bulk_drain_worker      — background, ainsert_fast(), yields to realtime
+        #   3. enrichment_worker      — lowest priority, ainsert() on pending list,
+        #                               starts automatically after bulk drain completes
         self._realtime_queue: asyncio.Queue = asyncio.Queue()
         self._ingest_lock: asyncio.Lock = asyncio.Lock()
+        # Event fired by bulk_drain_worker when it finishes — triggers enrichment_worker
+        self._bulk_drain_complete: asyncio.Event = asyncio.Event()
 
         # Enrichment tracking: paths fully enriched (entity graph built).
         # Loaded at startup so _process_one_historical skips re-adding them.
@@ -870,6 +875,145 @@ class WatcherDaemon:
 
         self.registry.update_last_sync(self.db_name)
         logger.info(f"✅ Bulk drain complete: {processed}/{total} files processed")
+        # Signal enrichment_worker that it can now start
+        self._bulk_drain_complete.set()
+
+    async def _enrichment_worker(self) -> None:
+        """Lowest-priority worker: retroactively builds entity graph for fast-inserted docs.
+
+        Starts automatically AFTER _bulk_drain_worker finishes (waits on
+        _bulk_drain_complete event). Processes files from enrichment_pending
+        one at a time, yielding to the realtime worker between each file.
+
+        Priority order:
+            1. realtime_watch_worker  (highest — always has _ingest_lock first)
+            2. bulk_drain_worker      (background — already done before we start)
+            3. enrichment_worker      (this — lowest, runs only when realtime is idle)
+
+        Crash-safe: marks each file done immediately after success.
+        Idempotent: checks enrichment_done set + doc_status DONE before calling ainsert().
+        """
+        logger.info("[enrichment] Worker started — waiting for bulk drain to finish...")
+        await self._bulk_drain_complete.wait()
+
+        pending_p = self._enrichment_pending_path()
+        done_p = self._enrichment_done_path()
+
+        # Load current pending and done sets
+        def _load() -> tuple[list[str], set[str]]:
+            pending: list[str] = []
+            if pending_p.exists():
+                with open(pending_p) as f:
+                    pending = [l.strip() for l in f if l.strip()]
+            done: set[str] = set()
+            if done_p.exists():
+                with open(done_p) as f:
+                    done = {l.strip() for l in f if l.strip()}
+            return pending, done
+
+        pending, done = _load()
+        # Deduplicate and subtract already-done
+        seen: set[str] = set()
+        work: list[str] = []
+        for p in pending:
+            if p not in seen and p not in done:
+                seen.add(p)
+                work.append(p)
+
+        if not work:
+            logger.info("[enrichment] No pending files — enrichment worker idle")
+            return
+
+        total = len(work)
+        logger.info(
+            f"[enrichment] Starting automatic enrichment: {total} files pending graph extraction"
+        )
+
+        enriched = 0
+        skipped = 0
+        errors = 0
+        core = await self._get_core()
+
+        for idx, file_path_str in enumerate(work, 1):
+            if not self.running:
+                logger.info("[enrichment] Stopping on shutdown signal")
+                break
+
+            # Yield to realtime: wait until queue is empty and lock is free
+            while not self._realtime_queue.empty() and self.running:
+                await asyncio.sleep(0.5)
+
+            if not self.running:
+                break
+
+            file_path = Path(file_path_str)
+
+            # Skip missing files — mark done so they don't come back
+            if not file_path.exists():
+                logger.debug(f"[enrichment] File gone: {file_path.name}")
+                self.mark_enrichment_done(file_path_str)
+                skipped += 1
+                continue
+
+            # Skip if already fully enriched (idempotency check)
+            if file_path_str in self._enrichment_done:
+                skipped += 1
+                continue
+
+            logger.info(f"[enrichment] [{idx}/{total}] 🔬 Enriching: {file_path.name}")
+
+            try:
+                content = file_path.read_text(encoding="utf-8", errors="ignore")
+                if not content.strip():
+                    self.mark_enrichment_done(file_path_str)
+                    skipped += 1
+                    continue
+
+                async with self._ingest_lock:
+                    success = await core.ainsert(content, str(file_path))
+
+                if success:
+                    self.mark_enrichment_done(file_path_str)
+                    enriched += 1
+                    pct = (idx / total) * 100
+                    logger.info(
+                        f"[enrichment] [{idx}/{total}] ✓ Graph built ({pct:.1f}% complete)"
+                    )
+                else:
+                    errors += 1
+                    logger.error(
+                        f"[enrichment] [{idx}/{total}] ✗ ainsert failed: {file_path.name}"
+                    )
+
+            except Exception as e:
+                errors += 1
+                logger.exception(
+                    f"[enrichment] [{idx}/{total}] ✗ Error: {file_path.name}: {e}"
+                )
+
+            gc.collect()
+            # Pause between files — lowest priority, no rush
+            await asyncio.sleep(self.batch_config.bulk_worker_pause_sec)
+
+        # Compact pending: remove completed paths
+        if pending_p.exists():
+            done_now: set[str] = set()
+            if done_p.exists():
+                with open(done_p) as f:
+                    done_now = {l.strip() for l in f if l.strip()}
+            with open(pending_p) as f:
+                all_pending = [l.strip() for l in f if l.strip()]
+            remaining_pending = [p for p in all_pending if p not in done_now]
+            with open(pending_p, "w") as f:
+                f.write("\n".join(remaining_pending))
+            logger.info(
+                f"[enrichment] Compacted pending: {len(remaining_pending)} still awaiting"
+            )
+
+        logger.info(
+            f"✅ Enrichment worker complete: "
+            f"{enriched} enriched, {skipped} skipped, {errors} errors"
+        )
 
     async def _realtime_watch_worker(self) -> None:
         """Priority worker: detects and ingests new/modified files immediately.
@@ -1545,9 +1689,11 @@ class WatcherDaemon:
                     # Case 3: DB populated — jump straight to watch mode
                     logger.info("✓ Database populated — starting watch mode")
 
-            # ── DUAL-WORKER PHASE ─────────────────────────────────────────────
-            # bulk_drain_worker   → background, historical files, ainsert_fast
+            # ── THREE-WORKER PHASE ────────────────────────────────────────────
             # realtime_watch_worker → priority, new/modified files, ainsert
+            # bulk_drain_worker     → background, historical files, ainsert_fast
+            # enrichment_worker     → lowest priority, auto-starts after bulk
+            #                         drain, retroactively builds entity graph
             bulk_task = asyncio.create_task(
                 self._bulk_drain_worker(historical, pending_file),
                 name="bulk_drain_worker",
@@ -1556,12 +1702,20 @@ class WatcherDaemon:
                 self._realtime_watch_worker(),
                 name="realtime_watch_worker",
             )
-
-            results = await asyncio.gather(
-                bulk_task, realtime_task, return_exceptions=True
+            enrichment_task = asyncio.create_task(
+                self._enrichment_worker(),
+                name="enrichment_worker",
             )
 
-            task_names = ["bulk_drain_worker", "realtime_watch_worker"]
+            results = await asyncio.gather(
+                bulk_task, realtime_task, enrichment_task, return_exceptions=True
+            )
+
+            task_names = [
+                "bulk_drain_worker",
+                "realtime_watch_worker",
+                "enrichment_worker",
+            ]
             for task_name, result in zip(task_names, results):
                 if isinstance(result, Exception):
                     logger.exception(f"Task '{task_name}' raised: {result}")
