@@ -7,22 +7,23 @@ Based on athena-lightrag patterns.
 Uses LiteLLM for provider-agnostic model access (Azure, OpenAI, Anthropic, etc.)
 """
 
-import os
 import asyncio
 import logging
+import os
 import random
 import re
 from collections import OrderedDict
-from pathlib import Path
-from typing import Dict, List, Optional, Literal, Union, Any, Set
 from dataclasses import dataclass
-from lightrag import LightRAG, QueryParam
-from lightrag.utils import EmbeddingFunc
+from pathlib import Path
+from typing import Any, Dict, List, Literal, Optional, Set, Union
+
 import litellm
 from dotenv import load_dotenv
+from lightrag import LightRAG, QueryParam
+from lightrag.utils import EmbeddingFunc
 
 # Import backend configuration
-from src.config.backend_config import BackendType, BackendConfig
+from src.config.backend_config import BackendConfig, BackendType
 
 # Load environment variables
 load_dotenv()
@@ -57,22 +58,27 @@ def extract_retry_after(exception: Exception) -> Optional[float]:
     error_str = str(exception)
 
     # Pattern: "retry after X seconds" (Azure style)
-    match = re.search(r'retry after (\d+(?:\.\d+)?)\s*(?:second|sec|s)', error_str, re.IGNORECASE)
+    match = re.search(
+        r"retry after (\d+(?:\.\d+)?)\s*(?:second|sec|s)", error_str, re.IGNORECASE
+    )
     if match:
         return float(match.group(1))
 
     # Pattern: "Retry-After: X" (header style)
-    match = re.search(r'Retry-After[:\s]+(\d+(?:\.\d+)?)', error_str, re.IGNORECASE)
+    match = re.search(r"Retry-After[:\s]+(\d+(?:\.\d+)?)", error_str, re.IGNORECASE)
     if match:
         return float(match.group(1))
 
     # Pattern: just "X seconds" after rate limit mention
-    if 'rate' in error_str.lower() and 'limit' in error_str.lower():
-        match = re.search(r'(\d+(?:\.\d+)?)\s*(?:second|sec|s)', error_str, re.IGNORECASE)
+    if "rate" in error_str.lower() and "limit" in error_str.lower():
+        match = re.search(
+            r"(\d+(?:\.\d+)?)\s*(?:second|sec|s)", error_str, re.IGNORECASE
+        )
         if match:
             return float(match.group(1))
 
     return None
+
 
 # HTTP status codes that are considered transient and should be retried
 TRANSIENT_HTTP_STATUS_CODES: Set[int] = {429, 500, 502, 503, 504}
@@ -97,30 +103,48 @@ def is_transient_error(exception: Exception) -> bool:
     # Check for specific LiteLLM exception types
     # RateLimitError, ServiceUnavailableError, Timeout, APIConnectionError are retryable
     transient_exception_patterns = [
-        'ratelimit', 'rate_limit', 'rate limit',
-        'timeout', 'timed out',
-        'connection', 'connectionerror',
-        'serviceunavailable', 'service_unavailable', 'service unavailable',
-        '429', '500', '502', '503', '504',
-        'temporarily unavailable',
-        'too many requests',
-        'server error',
-        'internal server error',
-        'bad gateway',
-        'gateway timeout',
-        'overloaded',
+        "ratelimit",
+        "rate_limit",
+        "rate limit",
+        "timeout",
+        "timed out",
+        "connection",
+        "connectionerror",
+        "serviceunavailable",
+        "service_unavailable",
+        "service unavailable",
+        "429",
+        "500",
+        "502",
+        "503",
+        "504",
+        "temporarily unavailable",
+        "too many requests",
+        "server error",
+        "internal server error",
+        "bad gateway",
+        "gateway timeout",
+        "overloaded",
     ]
 
     # Non-retryable patterns (auth errors, bad requests)
     non_retryable_patterns = [
-        'authentication', 'unauthorized', '401',
-        'forbidden', '403',
-        'invalid_api_key', 'invalid api key',
-        'bad request', '400',
-        'not found', '404',
-        'invalid_request', 'invalid request',
-        'malformed',
-        'validation error', '422',
+        "authentication",
+        "unauthorized",
+        "401",
+        "forbidden",
+        "403",
+        "invalid_api_key",
+        "invalid api key",
+        "bad request",
+        "400",
+        "not found",
+        "404",
+        "invalid_request",
+        "invalid request",
+        "malformed",
+        "validation error",
+        "422",
     ]
 
     # Check non-retryable patterns first
@@ -142,7 +166,7 @@ def calculate_backoff_with_jitter(
     initial_backoff: float = LITELLM_INITIAL_BACKOFF,
     max_backoff: float = LITELLM_MAX_BACKOFF,
     multiplier: float = LITELLM_BACKOFF_MULTIPLIER,
-    jitter_factor: float = LITELLM_JITTER_FACTOR
+    jitter_factor: float = LITELLM_JITTER_FACTOR,
 ) -> float:
     """
     Calculate exponential backoff with jitter.
@@ -158,7 +182,7 @@ def calculate_backoff_with_jitter(
         Backoff duration in seconds
     """
     # Exponential backoff
-    backoff = initial_backoff * (multiplier ** attempt)
+    backoff = initial_backoff * (multiplier**attempt)
 
     # Cap at max backoff
     backoff = min(backoff, max_backoff)
@@ -175,7 +199,7 @@ async def retry_with_backoff(
     *args,
     max_retries: int = LITELLM_MAX_RETRIES,
     operation_name: str = "LiteLLM call",
-    **kwargs
+    **kwargs,
 ):
     """
     Execute an async function with exponential backoff retry for transient errors.
@@ -246,13 +270,16 @@ async def retry_with_backoff(
     # Should not reach here, but raise last exception if we do
     raise last_exception
 
+
 # Type definitions
 QueryMode = Literal["local", "global", "hybrid", "naive", "mix"]
 ResponseType = Literal["Multiple Paragraphs", "Single Paragraph", "Bullet Points"]
 
+
 @dataclass
 class QueryResult:
     """Structured result from LightRAG query."""
+
     result: str
     mode: QueryMode
     context_only: bool
@@ -264,6 +291,7 @@ class QueryResult:
         """Ensure result is never None - coerce to empty string."""
         if self.result is None:
             self.result = ""
+
 
 class LRUCache:
     """
@@ -324,7 +352,7 @@ class HybridLightRAGCore:
         self,
         config,
         cache_max_size: int = DEFAULT_CACHE_MAX_SIZE,
-        backend_config: Optional[BackendConfig] = None
+        backend_config: Optional[BackendConfig] = None,
     ):
         """
         Initialize Hybrid LightRAG Core.
@@ -350,8 +378,10 @@ class HybridLightRAGCore:
         self.context_cache = LRUCache(max_size=cache_max_size)
 
         backend_info = f", backend: {self.backend_config.backend_type.value}"
-        logger.info(f"HybridLightRAGCore initialized with working dir: {self.config.working_dir}{backend_info}")
-    
+        logger.info(
+            f"HybridLightRAGCore initialized with working dir: {self.config.working_dir}{backend_info}"
+        )
+
     def _setup_api_key(self):
         """Setup API key and configure LiteLLM for Azure/OpenAI.
 
@@ -369,12 +399,20 @@ class HybridLightRAGCore:
         self.is_azure = self.config.model_name.startswith("azure/")
         self.is_azure_embed = self.config.embedding_model.startswith("azure/")
 
-        logger.info(f"Provider detection: model={self.config.model_name} -> is_azure={self.is_azure}")
-        logger.info(f"Provider detection: embed_model={self.config.embedding_model} -> is_azure_embed={self.is_azure_embed}")
+        logger.info(
+            f"Provider detection: model={self.config.model_name} -> is_azure={self.is_azure}"
+        )
+        logger.info(
+            f"Provider detection: embed_model={self.config.embedding_model} -> is_azure_embed={self.is_azure_embed}"
+        )
 
         # Get API key based on detected provider
         if self.is_azure:
-            self.api_key = self.config.api_key or os.getenv("AZURE_API_KEY") or os.getenv("AZURE_OPENAI_API_KEY")
+            self.api_key = (
+                self.config.api_key
+                or os.getenv("AZURE_API_KEY")
+                or os.getenv("AZURE_OPENAI_API_KEY")
+            )
             if not self.api_key:
                 raise ValueError(
                     "Azure API key not found. Set AZURE_API_KEY or AZURE_OPENAI_API_KEY "
@@ -391,21 +429,29 @@ class HybridLightRAGCore:
 
         # Get embedding API key (may differ from LLM key if using different providers)
         if self.is_azure_embed:
-            self.embed_api_key = os.getenv("AZURE_API_KEY") or os.getenv("AZURE_OPENAI_API_KEY") or self.api_key
+            self.embed_api_key = (
+                os.getenv("AZURE_API_KEY")
+                or os.getenv("AZURE_OPENAI_API_KEY")
+                or self.api_key
+            )
         else:
             self.embed_api_key = os.getenv("OPENAI_API_KEY") or self.api_key
 
         # Store Azure-specific configuration for LiteLLM calls (only used if is_azure=True)
-        self.azure_api_base = os.getenv("AZURE_API_BASE") or os.getenv("AZURE_OPENAI_ENDPOINT")
+        self.azure_api_base = os.getenv("AZURE_API_BASE") or os.getenv(
+            "AZURE_OPENAI_ENDPOINT"
+        )
         self.azure_api_version = os.getenv("AZURE_API_VERSION", "2024-02-01")
 
         # Configure LiteLLM environment based on provider
         if self.is_azure:
             if self.azure_api_base:
-                os.environ['AZURE_API_KEY'] = self.api_key
-                os.environ['AZURE_API_BASE'] = self.azure_api_base
-                os.environ['AZURE_API_VERSION'] = self.azure_api_version
-                logger.info(f"Configured LiteLLM for Azure OpenAI: {self.azure_api_base} (version: {self.azure_api_version})")
+                os.environ["AZURE_API_KEY"] = self.api_key
+                os.environ["AZURE_API_BASE"] = self.azure_api_base
+                os.environ["AZURE_API_VERSION"] = self.azure_api_version
+                logger.info(
+                    f"Configured LiteLLM for Azure OpenAI: {self.azure_api_base} (version: {self.azure_api_version})"
+                )
             else:
                 raise ValueError(
                     "Azure model detected but AZURE_API_BASE or AZURE_OPENAI_ENDPOINT not set. "
@@ -413,15 +459,15 @@ class HybridLightRAGCore:
                 )
         else:
             # For OpenAI/other providers - set OpenAI key and ensure Azure params don't leak
-            os.environ['OPENAI_API_KEY'] = self.api_key
+            os.environ["OPENAI_API_KEY"] = self.api_key
             logger.info("Configured LiteLLM for OpenAI: using OPENAI_API_KEY")
-    
+
     def _ensure_working_dir(self):
         """Ensure working directory exists."""
         working_dir = Path(self.config.working_dir)
         working_dir.mkdir(parents=True, exist_ok=True)
         logger.info(f"Working directory ready: {working_dir}")
-    
+
     def _init_lightrag(self):
         """Initialize LightRAG instance with LiteLLM for provider-agnostic access.
 
@@ -430,18 +476,34 @@ class HybridLightRAGCore:
         - PostgreSQL backend: PGKVStorage, PGVectorStorage, PGGraphStorage
         """
         backend_type = self.backend_config.backend_type.value
-        logger.info(f"Initializing LightRAG instance with LiteLLM (backend: {backend_type})")
+        logger.info(
+            f"Initializing LightRAG instance with LiteLLM (backend: {backend_type})"
+        )
 
         # CRITICAL: Set EMBEDDING_DIM in os.environ for LightRAG's PostgreSQL storage
         # LightRAG's postgres_impl.py reads this directly for vector column creation
         os.environ["EMBEDDING_DIM"] = str(self.config.embedding_dim)
-        logger.info(f"Set EMBEDDING_DIM={self.config.embedding_dim} for PostgreSQL vector columns")
+        logger.info(
+            f"Set EMBEDDING_DIM={self.config.embedding_dim} for PostgreSQL vector columns"
+        )
 
         # Known LiteLLM-compatible kwargs (filter out LightRAG internal objects)
         LITELLM_ALLOWED_KWARGS = {
-            'temperature', 'top_p', 'max_tokens', 'n', 'stream', 'stop',
-            'presence_penalty', 'frequency_penalty', 'logit_bias', 'user',
-            'response_format', 'seed', 'tools', 'tool_choice', 'timeout'
+            "temperature",
+            "top_p",
+            "max_tokens",
+            "n",
+            "stream",
+            "stop",
+            "presence_penalty",
+            "frequency_penalty",
+            "logit_bias",
+            "user",
+            "response_format",
+            "seed",
+            "tools",
+            "tool_choice",
+            "timeout",
         }
 
         # LLM model function using LiteLLM for provider-agnostic access
@@ -449,7 +511,7 @@ class HybridLightRAGCore:
             prompt: str,
             system_prompt: Optional[str] = None,
             history_messages: Optional[List[Dict[str, str]]] = None,
-            **kwargs
+            **kwargs,
         ) -> str:
             """
             LiteLLM-based completion function for Azure/OpenAI/Anthropic/etc.
@@ -460,9 +522,12 @@ class HybridLightRAGCore:
                 - Smart retry logic (only retries 429, 5xx; not 401, 400)
             """
             import time as _time
+
             _llm_start = _time.time()
             _prompt_preview = prompt[:200] + "..." if len(prompt) > 200 else prompt
-            logger.info(f"🚀 LLM SYNTHESIS START | model={self.config.model_name} | prompt_len={len(prompt)} | preview: {_prompt_preview}")
+            logger.info(
+                f"🚀 LLM SYNTHESIS START | model={self.config.model_name} | prompt_len={len(prompt)} | preview: {_prompt_preview}"
+            )
 
             messages = []
 
@@ -478,12 +543,15 @@ class HybridLightRAGCore:
 
             # Add the user prompt
             messages.append({"role": "user", "content": prompt})
-            logger.info(f"  └─ total_messages={len(messages)} | is_azure={self.is_azure}")
+            logger.info(
+                f"  └─ total_messages={len(messages)} | is_azure={self.is_azure}"
+            )
 
             # Filter kwargs to only include LiteLLM-compatible parameters
             # This excludes LightRAG internal objects like JsonKVStorage
             filtered_kwargs = {
-                k: v for k, v in kwargs.items()
+                k: v
+                for k, v in kwargs.items()
                 if k in LITELLM_ALLOWED_KWARGS and v is not None
             }
 
@@ -494,7 +562,7 @@ class HybridLightRAGCore:
                 "api_key": self.api_key,
                 # Set explicit timeout to prevent indefinite hangs
                 "timeout": filtered_kwargs.pop("timeout", LITELLM_DEFAULT_TIMEOUT),
-                **filtered_kwargs
+                **filtered_kwargs,
             }
 
             # Add Azure-specific parameters if using Azure
@@ -505,16 +573,22 @@ class HybridLightRAGCore:
             # Inner function for retry wrapper
             async def _do_completion():
                 _call_start = _time.time()
-                logger.info(f"  📡 LITELLM CALL START | model={litellm_kwargs['model']} | timeout={litellm_kwargs.get('timeout')}s")
+                logger.info(
+                    f"  📡 LITELLM CALL START | model={litellm_kwargs['model']} | timeout={litellm_kwargs.get('timeout')}s"
+                )
                 try:
                     response = await litellm.acompletion(**litellm_kwargs)
                     _call_elapsed = _time.time() - _call_start
                     content = response.choices[0].message.content
-                    logger.info(f"  ✅ LITELLM CALL SUCCESS | elapsed={_call_elapsed:.2f}s | response_len={len(content) if content else 0}")
+                    logger.info(
+                        f"  ✅ LITELLM CALL SUCCESS | elapsed={_call_elapsed:.2f}s | response_len={len(content) if content else 0}"
+                    )
                     return content
                 except Exception as _e:
                     _call_elapsed = _time.time() - _call_start
-                    logger.error(f"  ❌ LITELLM CALL FAILED | elapsed={_call_elapsed:.2f}s | error={type(_e).__name__}: {_e}")
+                    logger.error(
+                        f"  ❌ LITELLM CALL FAILED | elapsed={_call_elapsed:.2f}s | error={type(_e).__name__}: {_e}"
+                    )
                     raise
 
             # Execute with retry logic for transient errors
@@ -522,14 +596,18 @@ class HybridLightRAGCore:
                 result = await retry_with_backoff(
                     _do_completion,
                     max_retries=LITELLM_MAX_RETRIES,
-                    operation_name="LiteLLM completion"
+                    operation_name="LiteLLM completion",
                 )
                 _llm_total = _time.time() - _llm_start
-                logger.info(f"🏁 LLM SYNTHESIS COMPLETE | total_time={_llm_total:.2f}s | result_len={len(result) if result else 0}")
+                logger.info(
+                    f"🏁 LLM SYNTHESIS COMPLETE | total_time={_llm_total:.2f}s | result_len={len(result) if result else 0}"
+                )
                 return result
             except Exception as _e:
                 _llm_total = _time.time() - _llm_start
-                logger.error(f"💥 LLM SYNTHESIS FAILED | total_time={_llm_total:.2f}s | error={type(_e).__name__}: {_e}")
+                logger.error(
+                    f"💥 LLM SYNTHESIS FAILED | total_time={_llm_total:.2f}s | error={type(_e).__name__}: {_e}"
+                )
                 raise
 
         # Embedding function using LiteLLM for provider-agnostic embeddings
@@ -569,7 +647,7 @@ class HybridLightRAGCore:
             return await retry_with_backoff(
                 _do_embedding,
                 max_retries=LITELLM_MAX_RETRIES,
-                operation_name="LiteLLM embedding"
+                operation_name="LiteLLM embedding",
             )
 
         # Build LightRAG initialization kwargs
@@ -578,21 +656,22 @@ class HybridLightRAGCore:
             "llm_model_func": llm_model_func,
             "llm_model_max_async": self.config.max_async,
             "embedding_func": EmbeddingFunc(
-                embedding_dim=self.config.embedding_dim,
-                func=embedding_func
-            )
+                embedding_dim=self.config.embedding_dim, func=embedding_func
+            ),
         }
 
         # Configure storage backends based on backend_config
         if self.backend_config.backend_type == BackendType.POSTGRESQL:
             # PostgreSQL backend with pgvector
             storage_classes = self.backend_config.get_storage_classes()
-            lightrag_kwargs.update({
-                "kv_storage": storage_classes["kv_storage"],
-                "vector_storage": storage_classes["vector_storage"],
-                "graph_storage": storage_classes["graph_storage"],
-                "doc_status_storage": storage_classes["doc_status_storage"],
-            })
+            lightrag_kwargs.update(
+                {
+                    "kv_storage": storage_classes["kv_storage"],
+                    "vector_storage": storage_classes["vector_storage"],
+                    "graph_storage": storage_classes["graph_storage"],
+                    "doc_status_storage": storage_classes["doc_status_storage"],
+                }
+            )
 
             # Set PostgreSQL environment variables for LightRAG's storage classes
             env_vars = self.backend_config.get_env_vars()
@@ -616,8 +695,10 @@ class HybridLightRAGCore:
 
         # Initialize LightRAG with configured backends
         self.rag = LightRAG(**lightrag_kwargs)
-        logger.info(f"LightRAG initialized with LiteLLM (model: {self.config.model_name})")
-    
+        logger.info(
+            f"LightRAG initialized with LiteLLM (model: {self.config.model_name})"
+        )
+
     async def _ensure_initialized(self):
         """Ensure LightRAG storages are initialized (thread-safe)."""
         # Fast path: already initialized
@@ -636,12 +717,14 @@ class HybridLightRAGCore:
             # Import and call initialize_pipeline_status for fresh database
             try:
                 from lightrag.kg.shared_storage import initialize_pipeline_status
+
                 await initialize_pipeline_status()
                 logger.info("LightRAG pipeline status initialized successfully")
             except ImportError:
                 # Try alternative import path
                 try:
                     from lightrag.utils.pipeline_utils import initialize_pipeline_status
+
                     await initialize_pipeline_status()
                     logger.info("LightRAG pipeline status initialized successfully")
                 except ImportError as e:
@@ -649,7 +732,7 @@ class HybridLightRAGCore:
 
             self.rag_initialized = True
             logger.info("LightRAG storages and pipeline initialized successfully")
-    
+
     async def ainsert(self, content: str, file_path: str = None) -> bool:
         """
         Insert content into LightRAG knowledge graph.
@@ -666,12 +749,91 @@ class HybridLightRAGCore:
             # Pass file_paths to LightRAG for proper source tracking
             await self.rag.ainsert(content, file_paths=file_path)
             source_info = f" from {file_path}" if file_path else ""
-            logger.info(f"Successfully inserted content ({len(content)} chars){source_info}")
+            logger.info(
+                f"Successfully inserted content ({len(content)} chars){source_info}"
+            )
             return True
         except Exception as e:
             logger.error(f"Error inserting content: {e}")
             return False
-    
+
+    async def ainsert_fast(self, content: str, file_path: str | None = None) -> bool:
+        """
+        Fast insert: chunk + embed only, NO entity/graph extraction.
+        Use for bulk historical ingestion (files older than bulk_cutoff_days).
+        Docs are immediately queryable via vector search (naive/mix mode).
+        A separate enrichment pass can later run full entity extraction.
+        """
+        try:
+            await self._ensure_initialized()
+            rag = self.rag
+            from lightrag.utils import compute_mdhash_id
+
+            doc_key = compute_mdhash_id(content, prefix="doc-")
+
+            # Skip if already fully stored
+            new_doc_keys = await rag.full_docs.filter_keys({doc_key})
+            if not new_doc_keys:
+                logger.info(f"Doc {doc_key[:8]}... already in storage, skipping")
+                return True
+
+            # Chunk using LightRAG's own tokenizer + chunk size settings
+            chunk_size = rag.chunk_token_size
+            overlap = rag.chunk_overlap_token_size
+            tokenizer = rag.tokenizer
+            tokens = tokenizer.encode(content)
+            step = max(1, chunk_size - overlap)
+            chunks: list[str] = []
+            for i in range(0, max(1, len(tokens)), step):
+                chunk_text = tokenizer.decode(tokens[i : i + chunk_size])
+                if chunk_text.strip():
+                    chunks.append(chunk_text)
+            if not chunks:
+                chunks = [content]
+
+            # Build data structures matching LightRAG's format
+            fp = file_path or ""
+            new_docs = {doc_key: {"content": content, "file_path": fp}}
+            inserting_chunks: dict = {}
+            for idx, chunk_text in enumerate(chunks):
+                chunk_key = compute_mdhash_id(chunk_text, prefix="chunk-")
+                inserting_chunks[chunk_key] = {
+                    "content": chunk_text,
+                    "full_doc_id": doc_key,
+                    "tokens": len(tokenizer.encode(chunk_text)),
+                    "chunk_order_index": idx,
+                    "file_path": fp,
+                }
+
+            # Filter already-stored chunks
+            add_chunk_keys = await rag.text_chunks.filter_keys(
+                set(inserting_chunks.keys())
+            )
+            inserting_chunks = {
+                k: v for k, v in inserting_chunks.items() if k in add_chunk_keys
+            }
+            if not inserting_chunks:
+                logger.info("All chunks already in storage")
+                return True
+
+            # Store without entity extraction — vector search works immediately
+            await asyncio.gather(
+                rag.chunks_vdb.upsert(inserting_chunks),  # embeddings → vector search
+                rag.full_docs.upsert(new_docs),  # full doc store
+                rag.text_chunks.upsert(inserting_chunks),  # chunk text store
+            )
+            await rag._insert_done()
+
+            name = Path(fp).name if fp else "?"
+            logger.info(
+                f"⚡ Fast-inserted {len(chunks)} chunks ({len(content)} chars) "
+                f"from {name} [vector-only, pending enrichment]"
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Error fast-inserting content: {e}")
+            return False
+
     async def aquery(
         self,
         query: str,
@@ -681,11 +843,11 @@ class HybridLightRAGCore:
         top_k: int = 10,
         max_entity_tokens: int = 6000,
         max_relation_tokens: int = 8000,
-        **kwargs
+        **kwargs,
     ) -> QueryResult:
         """
         Query LightRAG with structured parameters.
-        
+
         Args:
             query: Search query
             mode: Query mode (local, global, hybrid, naive, mix)
@@ -695,16 +857,17 @@ class HybridLightRAGCore:
             max_entity_tokens: Maximum tokens for entity context
             max_relation_tokens: Maximum tokens for relation context
             **kwargs: Additional parameters
-            
+
         Returns:
             QueryResult with response and metadata
         """
         import time
+
         start_time = time.time()
-        
+
         try:
             await self._ensure_initialized()
-            
+
             # Create QueryParam with validated configuration
             query_param = QueryParam(
                 mode=mode,
@@ -713,47 +876,43 @@ class HybridLightRAGCore:
                 top_k=top_k,
                 max_entity_tokens=max_entity_tokens,
                 max_relation_tokens=max_relation_tokens,
-                **kwargs
+                **kwargs,
             )
-            
+
             # Execute query
             result = await self.rag.aquery(query, param=query_param)
-            
+
             execution_time = time.time() - start_time
-            
+
             # TODO: Implement token counting
             tokens_used = {"total": 0, "prompt": 0, "completion": 0}
-            
+
             logger.info(f"Query completed in {execution_time:.2f}s, mode: {mode}")
-            
+
             return QueryResult(
                 result=result,
                 mode=mode,
                 context_only=only_need_context,
                 tokens_used=tokens_used,
-                execution_time=execution_time
+                execution_time=execution_time,
             )
-            
+
         except Exception as e:
             execution_time = time.time() - start_time
             error_msg = f"Query failed: {str(e)}"
             logger.error(error_msg)
-            
+
             return QueryResult(
                 result="",
                 mode=mode,
                 context_only=only_need_context,
                 tokens_used={"total": 0, "prompt": 0, "completion": 0},
                 execution_time=execution_time,
-                error=error_msg
+                error=error_msg,
             )
-    
+
     async def local_query(
-        self,
-        query: str,
-        top_k: int = 10,
-        max_entity_tokens: int = 6000,
-        **kwargs
+        self, query: str, top_k: int = 10, max_entity_tokens: int = 6000, **kwargs
     ) -> QueryResult:
         """Query LightRAG in local mode for specific entity relationships."""
         return await self.aquery(
@@ -761,15 +920,11 @@ class HybridLightRAGCore:
             mode="local",
             top_k=top_k,
             max_entity_tokens=max_entity_tokens,
-            **kwargs
+            **kwargs,
         )
-    
+
     async def global_query(
-        self,
-        query: str,
-        top_k: int = 10,
-        max_relation_tokens: int = 8000,
-        **kwargs
+        self, query: str, top_k: int = 10, max_relation_tokens: int = 8000, **kwargs
     ) -> QueryResult:
         """Query LightRAG in global mode for high-level overviews."""
         return await self.aquery(
@@ -777,16 +932,16 @@ class HybridLightRAGCore:
             mode="global",
             top_k=top_k,
             max_relation_tokens=max_relation_tokens,
-            **kwargs
+            **kwargs,
         )
-    
+
     async def hybrid_query(
         self,
         query: str,
         top_k: int = 10,
         max_entity_tokens: int = 6000,
         max_relation_tokens: int = 8000,
-        **kwargs
+        **kwargs,
     ) -> QueryResult:
         """Query LightRAG in hybrid mode combining local and global."""
         return await self.aquery(
@@ -795,46 +950,39 @@ class HybridLightRAGCore:
             top_k=top_k,
             max_entity_tokens=max_entity_tokens,
             max_relation_tokens=max_relation_tokens,
-            **kwargs
+            **kwargs,
         )
-    
+
     async def extract_context(
-        self,
-        query: str,
-        mode: QueryMode = "hybrid",
-        top_k: int = 10,
-        **kwargs
+        self, query: str, mode: QueryMode = "hybrid", top_k: int = 10, **kwargs
     ) -> str:
         """Extract raw context without generating response."""
         result = await self.aquery(
-            query=query,
-            mode=mode,
-            only_need_context=True,
-            top_k=top_k,
-            **kwargs
+            query=query, mode=mode, only_need_context=True, top_k=top_k, **kwargs
         )
         # Defensive: ensure we never return None (QueryResult.__post_init__ should handle this)
         return result.result or ""
-    
+
     def get_stats(self) -> Dict[str, Any]:
         """Get statistics about the LightRAG instance."""
         working_dir = Path(self.config.working_dir)
-        
+
         stats = {
             "working_directory": str(working_dir),
             "initialized": self.rag_initialized,
             "model_name": self.config.model_name,
             "embedding_model": self.config.embedding_model,
-            "cache_size": len(self.context_cache)
+            "cache_size": len(self.context_cache),
         }
-        
+
         # Check for graph files
         if working_dir.exists():
             graph_files = list(working_dir.glob("*.json"))
             stats["graph_files"] = len(graph_files)
-            
+
             # Get storage sizes
             from src.utils import format_file_size
+
             storage_info = {}
             for file_path in graph_files:
                 try:
@@ -843,21 +991,18 @@ class HybridLightRAGCore:
                 except Exception:
                     storage_info[file_path.name] = "unknown"
             stats["storage_info"] = storage_info
-        
+
         return stats
-    
+
     async def health_check(self) -> Dict[str, Any]:
         """Perform health check on the LightRAG system."""
-        health = {
-            "status": "unknown",
-            "checks": {}
-        }
-        
+        health = {"status": "unknown", "checks": {}}
+
         try:
             # Check initialization
             await self._ensure_initialized()
             health["checks"]["initialization"] = "ok"
-            
+
             # Test simple query
             test_query = "test health check query"
             result = await self.aquery(test_query, mode="local", top_k=1)
@@ -865,25 +1010,26 @@ class HybridLightRAGCore:
                 health["checks"]["query"] = f"failed: {result.error}"
             else:
                 health["checks"]["query"] = "ok"
-            
+
             # Check working directory
             working_dir = Path(self.config.working_dir)
             if working_dir.exists() and working_dir.is_dir():
                 health["checks"]["working_directory"] = "ok"
             else:
                 health["checks"]["working_directory"] = "missing"
-            
+
             # Overall status
             if all(check == "ok" for check in health["checks"].values()):
                 health["status"] = "healthy"
             else:
                 health["status"] = "degraded"
-                
+
         except Exception as e:
             health["status"] = "unhealthy"
             health["error"] = str(e)
-        
+
         return health
+
 
 def get_storage_classes(backend_type: Union[BackendType, str]) -> Dict[str, str]:
     """
@@ -923,8 +1069,7 @@ def get_storage_classes(backend_type: Union[BackendType, str]) -> Dict[str, str]
 
 
 def create_lightrag_core(
-    config,
-    backend_config: Optional[BackendConfig] = None
+    config, backend_config: Optional[BackendConfig] = None
 ) -> HybridLightRAGCore:
     """
     Factory function to create HybridLightRAGCore instance.

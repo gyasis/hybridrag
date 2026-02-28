@@ -53,14 +53,21 @@ from src.database_registry import (
 class BatchConfig:
     """Configuration for batch processing."""
 
-    batch_size: int = 10  # Files per batch (normal load)
-    batch_size_low: int = 2  # Files per batch (high load)
+    batch_size: int = 5  # Files per batch (normal load, CPU < 90%)
+    batch_size_low: int = 2  # Files per batch (high load, 90–98% CPU)
+    batch_size_critical: int = 1  # Files per batch (critical load, CPU >= 98%)
     sleep_between_batches: float = 2.0  # Seconds
     high_load_cpu_percent: float = 90.0  # Switch to 2 files if CPU above this
     high_load_memory_percent: float = 90.0  # Switch to 2 files if memory above this
-    critical_cpu_percent: float = 95.0  # Pause if CPU above this
-    critical_memory_percent: float = 95.0  # Pause if memory above this
+    critical_cpu_percent: float = (
+        98.0  # Switch to 1 file if CPU above this (never blocks)
+    )
+    critical_memory_percent: float = 95.0  # Switch to 1 file if memory above this
     check_interval: float = 5.0  # Seconds between resource checks
+    bulk_cutoff_days: int = 30  # Files older than this (mtime) use ainsert_fast
+    bulk_worker_pause_sec: float = (
+        1.0  # Pause between historical files (yield to realtime)
+    )
 
 
 class ResourceMonitor:
@@ -79,30 +86,30 @@ class ResourceMonitor:
         cpu_percent = psutil.cpu_percent(interval=1)
         memory_percent = psutil.virtual_memory().percent
 
-        # Critical load - pause completely
+        # Critical load (>=98%) — 1 file at a time, never blocks
         if cpu_percent > self.config.critical_cpu_percent:
-            return "critical", f"CPU: {cpu_percent:.1f}% > {self.config.critical_cpu_percent}%"
+            return (
+                "critical",
+                f"CPU: {cpu_percent:.1f}% > {self.config.critical_cpu_percent}%",
+            )
         if memory_percent > self.config.critical_memory_percent:
-            return "critical", f"Memory: {memory_percent:.1f}% > {self.config.critical_memory_percent}%"
+            return (
+                "critical",
+                f"Memory: {memory_percent:.1f}% > {self.config.critical_memory_percent}%",
+            )
 
-        # High load - reduce batch size to 2
+        # High load (90-98%) — reduce to batch_size_low
         if cpu_percent > self.config.high_load_cpu_percent:
             return "high", f"CPU: {cpu_percent:.1f}% (high load)"
         if memory_percent > self.config.high_load_memory_percent:
             return "high", f"Memory: {memory_percent:.1f}% (high load)"
 
-        # Normal load - full batch size
+        # Normal load (<90%) — full batch size
         return "normal", ""
 
     async def wait_until_system_ready(self, logger_instance: logging.Logger) -> None:
-        """Wait until system load is not critical."""
-        while True:
-            level, reason = self.get_load_level()
-            if level != "critical":
-                return
-
-            logger_instance.info(f"⏸️  Critical load ({reason}), pausing ingestion...")
-            await asyncio.sleep(30)  # Check again in 30 seconds
+        """No-op: blocking pause removed. Throttling is done via batch size only."""
+        return
 
 
 class PerformanceTracker:
@@ -114,7 +121,9 @@ class PerformanceTracker:
     - Warns users when ingestion is >50% slower than baseline
     """
 
-    def __init__(self, window_size: int = 20, degradation_threshold_pct: int = 50) -> None:
+    def __init__(
+        self, window_size: int = 20, degradation_threshold_pct: int = 50
+    ) -> None:
         """Initialize performance tracker.
 
         Args:
@@ -154,13 +163,21 @@ class PerformanceTracker:
         # Update baseline after sufficient data
         if len(self._rates) >= 5 and self._baseline_rate is None:
             self._baseline_rate = self._calculate_average()
-            logger.info(f"📊 Performance baseline established: {self._baseline_rate:.1f} docs/min")
+            logger.info(
+                f"📊 Performance baseline established: {self._baseline_rate:.1f} docs/min"
+            )
 
         # Check for degradation
         self._cycles_since_warning += 1
-        if self._baseline_rate and len(self._rates) >= 3 and self._cycles_since_warning >= self._warning_cooldown:
+        if (
+            self._baseline_rate
+            and len(self._rates) >= 3
+            and self._cycles_since_warning >= self._warning_cooldown
+        ):
             current_avg = self._calculate_recent_average()
-            degradation_pct = ((self._baseline_rate - current_avg) / self._baseline_rate) * 100
+            degradation_pct = (
+                (self._baseline_rate - current_avg) / self._baseline_rate
+            ) * 100
 
             if degradation_pct >= self._degradation_threshold_pct:
                 self._cycles_since_warning = 0
@@ -271,16 +288,20 @@ def setup_logging(db_name: str) -> logging.Logger:
         backupCount=5,
         encoding="utf-8",
     )
-    file_handler.setFormatter(logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    ))
+    file_handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        )
+    )
     log.addHandler(file_handler)
 
     # Also log to stderr for systemd/console
     console_handler = logging.StreamHandler()
-    console_handler.setFormatter(logging.Formatter(
-        "%(asctime)s - %(levelname)s - %(message)s",
-    ))
+    console_handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s - %(levelname)s - %(message)s",
+        )
+    )
     log.addHandler(console_handler)
 
     return log
@@ -292,6 +313,7 @@ def cleanup_old_logs(log_dir: Path, days: int = 7) -> int:
     Returns count of files removed.
     """
     import time as time_module
+
     cutoff = time_module.time() - (days * 24 * 60 * 60)
     removed = 0
 
@@ -468,6 +490,15 @@ class WatcherDaemon:
         self.batch_config = BatchConfig()
         self.resource_monitor = ResourceMonitor(self.batch_config)
 
+        # Dual-queue priority architecture: realtime (high-priority) + bulk (background)
+        # asyncio.Queue / Lock are safe to construct outside an event loop in Python 3.10+
+        self._realtime_queue: asyncio.Queue = asyncio.Queue()
+        self._ingest_lock: asyncio.Lock = asyncio.Lock()
+
+        # Enrichment tracking: paths fully enriched (entity graph built).
+        # Loaded at startup so _process_one_historical skips re-adding them.
+        self._enrichment_done: set[str] = self._load_enrichment_done()
+
         # Load database entry (must be done first)
         self._load_entry()
 
@@ -486,7 +517,9 @@ class WatcherDaemon:
                 for doc_id in doc_status:
                     if doc_id.startswith("doc-"):
                         self.ingested_hashes.add(doc_id[4:])  # Remove "doc-" prefix
-                logger.info(f"Loaded {len(self.ingested_hashes)} existing document hashes")
+                logger.info(
+                    f"Loaded {len(self.ingested_hashes)} existing document hashes"
+                )
             except Exception as e:
                 logger.warning(f"Could not load doc status: {e}")
 
@@ -498,6 +531,48 @@ class WatcherDaemon:
         """Check if content has already been ingested."""
         content_hash = self._content_hash(content)
         return content_hash in self.ingested_hashes
+
+    def _enrichment_pending_path(self) -> Path:
+        return Path.home() / ".hybridrag" / "enrichment_pending" / f"{self.db_name}.txt"
+
+    def _enrichment_done_path(self) -> Path:
+        return Path.home() / ".hybridrag" / "enrichment_done" / f"{self.db_name}.txt"
+
+    def _load_enrichment_done(self) -> set[str]:
+        """Load the set of file paths already fully enriched (entity graph built).
+
+        Called at startup so _process_one_historical never re-adds a path
+        that has already been enriched by the enrichment job.
+        """
+        done_path = (
+            Path.home() / ".hybridrag" / "enrichment_done" / f"{self.db_name}.txt"
+        )
+        if not done_path.exists():
+            return set()
+        try:
+            with open(done_path) as f:
+                paths = {line.strip() for line in f if line.strip()}
+            logger.info(f"Loaded {len(paths)} enrichment-done paths")
+            return paths
+        except Exception as e:
+            logger.warning(f"Could not load enrichment_done: {e}")
+            return set()
+
+    def mark_enrichment_done(self, file_path: str) -> None:
+        """Mark a file as fully enriched (entity graph extracted).
+
+        Called by the enrichment job after successfully running ainsert()
+        on a fast-inserted doc. Adds path to enrichment_done file and
+        in-memory set so it won't be re-queued for enrichment.
+
+        Args:
+            file_path: Absolute path string of the enriched file
+        """
+        self._enrichment_done.add(file_path)
+        done_path = self._enrichment_done_path()
+        done_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(done_path, "a") as f:
+            f.write(file_path + "\n")
 
     def _load_entry(self) -> None:
         """Load database entry from registry."""
@@ -517,11 +592,12 @@ class WatcherDaemon:
         self.pid_file = get_watcher_pid_file(self.db_name)
 
         # Initialize change detector
-        # Use extensions from config, or default to .md if not specified
-        extensions = self.entry.file_extensions if self.entry.file_extensions else [".md"]
+        # Normalize extensions: registry stores 'md' without dot, path.suffix returns '.md'
+        raw_exts = self.entry.file_extensions if self.entry.file_extensions else [".md"]
+        extensions = [e if e.startswith(".") else f".{e}" for e in raw_exts]
         logger.info(f"  File extensions from config: {self.entry.file_extensions}")
         # For specstory source type, only watch .specstory folders
-        specstory_only = (self.entry.source_type == "specstory")
+        specstory_only = self.entry.source_type == "specstory"
         self.detector = FileChangeDetector(
             folder=self.entry.source_folder,
             recursive=self.entry.recursive,
@@ -554,14 +630,26 @@ class WatcherDaemon:
             degradation_threshold_pct=degradation_threshold,
         )
 
-        logger.info(f"  Performance tracking enabled (degradation threshold: {degradation_threshold}%)")
+        logger.info(
+            f"  Performance tracking enabled (degradation threshold: {degradation_threshold}%)"
+        )
 
     def _get_pending_file_path(self) -> Path:
         """Get the path to the pending files list."""
-        return Path.home() / ".hybridrag" / "batch_ingestion" / f"{self.db_name}.pending.txt"
+        return (
+            Path.home()
+            / ".hybridrag"
+            / "batch_ingestion"
+            / f"{self.db_name}.pending.txt"
+        )
 
     async def _get_document_count(self) -> int:
         """Get document count from LightRAG database.
+
+        Checks both kv_store_doc_status.json (full ainsert) AND
+        kv_store_full_docs.json (ainsert_fast embed-only) so that
+        fast-inserted docs are counted and don't trigger re-discovery
+        on every restart.
 
         Returns:
             Number of documents in database, 0 if unable to determine
@@ -569,13 +657,24 @@ class WatcherDaemon:
         """
         assert self.entry is not None, "Database entry must be loaded"
         try:
-            doc_status_path = Path(self.entry.path) / "kv_store_doc_status.json"
+            db_path = Path(self.entry.path)
+            total = 0
+
+            # Count fully-processed docs (ainsert path)
+            doc_status_path = db_path / "kv_store_doc_status.json"
             if doc_status_path.exists():
                 with open(doc_status_path) as f:
                     doc_status = json.load(f)
-                # Count document entries (doc-{hash} format)
-                return sum(1 for key in doc_status if key.startswith("doc-"))
-            return 0
+                total += sum(1 for key in doc_status if key.startswith("doc-"))
+
+            # Also count fast-inserted docs (ainsert_fast path — not in doc_status)
+            full_docs_path = db_path / "kv_store_full_docs.json"
+            if full_docs_path.exists() and total == 0:
+                with open(full_docs_path) as f:
+                    full_docs = json.load(f)
+                total += sum(1 for key in full_docs if key.startswith("doc-"))
+
+            return total
         except Exception as e:
             logger.warning(f"Could not get document count: {e}")
             return 0
@@ -625,6 +724,214 @@ class WatcherDaemon:
         with open(pending_file, "w") as f:
             f.write("\n".join(files))
 
+    def _split_pending_by_age(self, paths: list[str]) -> tuple[list[str], list[str]]:
+        """Partition file paths into (historical, recent) by mtime.
+
+        Historical (mtime > bulk_cutoff_days old) → ainsert_fast via bulk worker.
+        Recent (mtime <= bulk_cutoff_days old) → ainsert via realtime queue.
+        OSError on stat → treated as recent (safe default: full pipeline).
+
+        Returns:
+            (historical_paths, recent_paths)
+        """
+        cutoff_ts = time.time() - (self.batch_config.bulk_cutoff_days * 86400)
+        historical: list[str] = []
+        recent: list[str] = []
+
+        for path_str in paths:
+            try:
+                mtime = Path(path_str).stat().st_mtime
+                if mtime < cutoff_ts:
+                    historical.append(path_str)
+                else:
+                    recent.append(path_str)
+            except OSError:
+                recent.append(path_str)  # can't stat → full pipeline
+
+        logger.info(
+            f"Age split: {len(historical)} historical "
+            f"(>{self.batch_config.bulk_cutoff_days}d old → ⚡fast), "
+            f"{len(recent)} recent (≤{self.batch_config.bulk_cutoff_days}d → 🔬full)"
+        )
+        return historical, recent
+
+    async def _process_one_historical(self, file_path_str: str) -> None:
+        """Process a single historical file with ainsert_fast (embed-only).
+
+        Must be called while holding self._ingest_lock.
+        Tracks enrichment-pending for later graph backfill.
+        """
+        core = await self._get_core()
+        try:
+            file_path = Path(file_path_str)
+            if not file_path.exists():
+                logger.warning(f"  [bulk] File not found: {file_path.name}")
+                self.stats["errors"] += 1
+                return
+
+            content = file_path.read_text(encoding="utf-8", errors="ignore")
+            if not content.strip():
+                logger.debug(f"  [bulk] Skipped empty: {file_path.name}")
+                return
+
+            if self._is_duplicate(content):
+                logger.debug(f"  [bulk] Skipped duplicate: {file_path.name}")
+                self.stats["duplicates_skipped"] += 1
+                return
+
+            success = await core.ainsert_fast(content, str(file_path))
+            if success:
+                self.ingested_hashes.add(self._content_hash(content))
+                self.stats["total_ingested"] += 1
+                logger.info(f"  ✓ [⚡bulk]: {file_path.name}")
+                # Track for future enrichment only if not already done
+                fp_str = str(file_path)
+                if fp_str not in self._enrichment_done:
+                    pending_path = self._enrichment_pending_path()
+                    pending_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(pending_path, "a") as ef:
+                        ef.write(fp_str + "\n")
+                else:
+                    logger.debug(
+                        f"  [bulk] Skipped enrichment_pending (already done): "
+                        f"{file_path.name}"
+                    )
+            else:
+                self.stats["errors"] += 1
+                logger.error(f"  ✗ [⚡bulk] Failed: {file_path.name}")
+
+        except Exception as e:
+            self.stats["errors"] += 1
+            self.stats["last_error"] = f"{file_path_str}: {e!s}"
+            logger.exception(f"  ✗ [bulk] Error processing {file_path_str}: {e}")
+
+    async def _bulk_drain_worker(
+        self, historical: list[str], pending_file: Path
+    ) -> None:
+        """Background worker: drains historical backlog with ainsert_fast.
+
+        Priority logic: before each file, waits until _realtime_queue is empty.
+        This guarantees realtime (new/modified) files are always processed first.
+
+        Holds _ingest_lock per-file so LightRAG is never written concurrently.
+        Saves progress every 10 files for crash recovery.
+        """
+        if not historical:
+            logger.info("[bulk] No historical files — bulk worker idle")
+            return
+
+        total = len(historical)
+        logger.info(f"📦 Bulk drain worker: {total} historical files to process")
+
+        remaining = list(historical)
+        processed = 0
+
+        while remaining and self.running:
+            # Yield priority: wait until realtime queue is drained
+            while not self._realtime_queue.empty() and self.running:
+                logger.debug("[bulk] Realtime queue active — yielding (200ms)")
+                await asyncio.sleep(0.2)
+
+            if not self.running:
+                break
+
+            file_path_str = remaining[0]
+
+            # One file at a time under the lock so realtime can interleave between files
+            async with self._ingest_lock:
+                await self._process_one_historical(file_path_str)
+
+            remaining.pop(0)
+            processed += 1
+
+            # Checkpoint every 10 files
+            if processed % 10 == 0:
+                self._save_pending_files(pending_file, remaining)
+                pct = (processed / total) * 100
+                logger.info(f"[bulk] Progress: {processed}/{total} ({pct:.1f}%)")
+
+            if processed % 50 == 0:
+                gc.collect()
+
+            if processed % 10 == 0:
+                self.registry.update_last_sync(self.db_name)
+
+            # Pause to yield the event loop between files
+            await asyncio.sleep(self.batch_config.bulk_worker_pause_sec)
+
+        # Cleanup
+        if not remaining:
+            if pending_file.exists():
+                pending_file.unlink()
+                logger.info("[bulk] Pending file removed — drain complete")
+        else:
+            self._save_pending_files(pending_file, remaining)
+            logger.info(f"[bulk] Interrupted at {processed}/{total} — progress saved")
+
+        self.registry.update_last_sync(self.db_name)
+        logger.info(f"✅ Bulk drain complete: {processed}/{total} files processed")
+
+    async def _realtime_watch_worker(self) -> None:
+        """Priority worker: detects and ingests new/modified files immediately.
+
+        Drains _realtime_queue first (pre-seeded recent files + newly detected),
+        then polls the filesystem for changes at watch_interval.
+
+        Uses _ingest_lock per-file to interleave safely with _bulk_drain_worker.
+        Graph extraction (entity/relations) runs for every file here — full pipeline.
+        """
+        assert self.entry is not None
+        assert self.detector is not None
+
+        logger.info(f"\n{'='*60}")
+        logger.info("REALTIME WATCH WORKER — monitoring for new/modified files")
+        logger.info(f"{'='*60}")
+
+        # Establish filesystem baseline (so detect_changes knows what's "new")
+        self.detector.scan_files()
+        logger.info(f"Baseline: {len(self.detector.known_files)} files tracked")
+        logger.info(f"Polling every {self.entry.watch_interval}s")
+
+        while self.running:
+            # --- Drain pre-seeded + newly detected items from realtime queue ---
+            while not self._realtime_queue.empty():
+                try:
+                    file_path_str = self._realtime_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+
+                file_path = Path(file_path_str)
+                if not file_path.exists():
+                    logger.debug(f"[realtime] File gone: {file_path.name}")
+                    continue
+
+                # Lock ensures we don't overlap with bulk worker
+                async with self._ingest_lock:
+                    await self._ingest_changes(
+                        new_files={file_path},
+                        modified_files=set(),
+                    )
+
+            # --- Detect new filesystem changes ---
+            new_files, modified_files, deleted_files = self.detector.detect_changes()
+
+            if new_files or modified_files:
+                n_changes = len(new_files) + len(modified_files)
+                logger.info(
+                    f"Changes: +{len(new_files)} new, ~{len(modified_files)} modified, "
+                    f"-{len(deleted_files)} deleted"
+                )
+                if n_changes >= self.batch_config.batch_size:
+                    logger.info(
+                        f"📦 Multiple changes ({n_changes}) — queued for priority processing"
+                    )
+                for fp in new_files | modified_files:
+                    await self._realtime_queue.put(str(fp))
+            else:
+                logger.debug("No changes detected")
+
+            await asyncio.sleep(self.entry.watch_interval)
+
     async def _process_batch(self, batch: list[str]) -> tuple[int, int, int]:
         """Process a batch of files using existing ingestion logic.
 
@@ -661,17 +968,39 @@ class WatcherDaemon:
                     self.stats["duplicates_skipped"] += 1
                     continue
 
-                # Ingest using existing core
-                success = await core.ainsert(content, str(file_path))
+                # Route by file age: old files → fast (embed only), recent → full pipeline
+                cutoff_ts = time.time() - (self.batch_config.bulk_cutoff_days * 86400)
+                try:
+                    is_old = file_path.stat().st_mtime < cutoff_ts
+                except OSError:
+                    is_old = False  # if can't stat, default to full mode
+
+                if is_old:
+                    success = await core.ainsert_fast(content, str(file_path))
+                    mode_label = "⚡fast"
+                else:
+                    success = await core.ainsert(content, str(file_path))
+                    mode_label = "🔬full"
+
                 if success:
                     self.ingested_hashes.add(self._content_hash(content))
                     ingested += 1
                     self.stats["total_ingested"] += 1
-                    logger.info(f"  ✓ Ingested: {file_path.name}")
+                    logger.info(f"  ✓ Ingested [{mode_label}]: {file_path.name}")
+                    if is_old:
+                        enrichment_file = (
+                            Path.home()
+                            / ".hybridrag"
+                            / "enrichment_pending"
+                            / f"{self.db_name}.txt"
+                        )
+                        enrichment_file.parent.mkdir(parents=True, exist_ok=True)
+                        with open(enrichment_file, "a") as ef:
+                            ef.write(str(file_path) + "\n")
                 else:
                     errors += 1
                     self.stats["errors"] += 1
-                    logger.error(f"  ✗ Failed: {file_path.name}")
+                    logger.error(f"  ✗ Failed [{mode_label}]: {file_path.name}")
 
             except Exception as e:
                 errors += 1
@@ -695,8 +1024,11 @@ class WatcherDaemon:
 
         total_files = len(pending)
         logger.info(f"📦 Batch mode starting: {total_files} files pending")
-        logger.info(f"   Batch size: {self.batch_config.batch_size} (normal) / {self.batch_config.batch_size_low} (high load)")
-        logger.info(f"   Resource thresholds: High load at {self.batch_config.high_load_cpu_percent}% CPU, Critical at {self.batch_config.critical_cpu_percent}% CPU")
+        logger.info(
+            f"   Batch sizes: {self.batch_config.batch_size} (normal <{self.batch_config.high_load_cpu_percent}% CPU) / "
+            f"{self.batch_config.batch_size_low} (high {self.batch_config.high_load_cpu_percent}-{self.batch_config.critical_cpu_percent}% CPU) / "
+            f"{self.batch_config.batch_size_critical} (critical >{self.batch_config.critical_cpu_percent}% CPU — never blocks)"
+        )
 
         total_ingested = 0
         total_skipped = 0
@@ -706,15 +1038,19 @@ class WatcherDaemon:
         while pending:
             batch_num += 1
 
-            # Wait if system is at critical load
-            await self.resource_monitor.wait_until_system_ready(logger)
-
-            # Check load level and adjust batch size
+            # Check load level and adjust batch size (no blocking — always continues)
             load_level, load_reason = self.resource_monitor.get_load_level()
 
-            if load_level == "high":
+            if load_level == "critical":
+                current_batch_size = self.batch_config.batch_size_critical
+                logger.info(
+                    f"🔴 Critical load ({load_reason}) - 1 file at a time (no pause)"
+                )
+            elif load_level == "high":
                 current_batch_size = self.batch_config.batch_size_low
-                logger.info(f"🐢 High load detected ({load_reason}) - using reduced batch size: {current_batch_size} files")
+                logger.info(
+                    f"🐢 High load ({load_reason}) - reduced batch size: {current_batch_size} files"
+                )
             else:
                 current_batch_size = self.batch_config.batch_size
 
@@ -723,7 +1059,9 @@ class WatcherDaemon:
             remaining = pending[current_batch_size:]
 
             # Process batch
-            logger.info(f"\n🔄 Batch {batch_num}: Processing {len(batch)} files ({len(remaining)} remaining)")
+            logger.info(
+                f"\n🔄 Batch {batch_num}: Processing {len(batch)} files ({len(remaining)} remaining)"
+            )
             ingested, skipped, errors = await self._process_batch(batch)
 
             # Update stats
@@ -736,8 +1074,12 @@ class WatcherDaemon:
 
             # Log progress
             progress_pct = ((total_files - len(remaining)) / total_files) * 100
-            logger.info(f"   Batch complete: +{ingested} ingested, ~{skipped} skipped, x{errors} errors")
-            logger.info(f"   Overall progress: {progress_pct:.1f}% ({total_files - len(remaining)}/{total_files})")
+            logger.info(
+                f"   Batch complete: +{ingested} ingested, ~{skipped} skipped, x{errors} errors"
+            )
+            logger.info(
+                f"   Overall progress: {progress_pct:.1f}% ({total_files - len(remaining)}/{total_files})"
+            )
 
             # Update pending list
             pending = remaining
@@ -753,12 +1095,12 @@ class WatcherDaemon:
                 await asyncio.sleep(self.batch_config.sleep_between_batches)
 
         # Final summary
-        logger.info("\n" + "="*60)
+        logger.info("\n" + "=" * 60)
         logger.info("🎉 BATCH MODE COMPLETE!")
         logger.info(f"   Total ingested: {total_ingested}")
         logger.info(f"   Duplicates skipped: {total_skipped}")
         logger.info(f"   Errors: {total_errors}")
-        logger.info("="*60)
+        logger.info("=" * 60)
 
         # Clean up pending file
         if pending_file.exists():
@@ -792,13 +1134,17 @@ class WatcherDaemon:
         # Check if already running (with lock verification)
         running, existing_pid = is_watcher_running(self.db_name)
         if running:
-            logger.error(f"Watcher already running for {self.db_name} (PID: {existing_pid})")
+            logger.error(
+                f"Watcher already running for {self.db_name} (PID: {existing_pid})"
+            )
             return False
 
         # Acquire lock and write PID atomically
         self._lock_fd = acquire_watcher_lock(self.db_name, os.getpid())
         if self._lock_fd is None:
-            logger.error(f"Failed to acquire lock for {self.db_name} - another instance may be starting")
+            logger.error(
+                f"Failed to acquire lock for {self.db_name} - another instance may be starting"
+            )
             return False
 
         logger.info(f"PID file: {self.pid_file} (locked)")
@@ -963,7 +1309,9 @@ class WatcherDaemon:
             return
 
         total_files = len(all_changed)
-        logger.info(f"Processing {total_files} changed file(s) in batches of {self.BATCH_SIZE}")
+        logger.info(
+            f"Processing {total_files} changed file(s) in batches of {self.BATCH_SIZE}"
+        )
 
         # T012: Track ingestion timing for performance monitoring
         ingest_start_time = time.time()
@@ -987,7 +1335,9 @@ class WatcherDaemon:
                 batch_num = (batch_start // self.BATCH_SIZE) + 1
                 total_batches = (total_files + self.BATCH_SIZE - 1) // self.BATCH_SIZE
 
-                logger.info(f"Processing batch {batch_num}/{total_batches} ({len(batch)} files)")
+                logger.info(
+                    f"Processing batch {batch_num}/{total_batches} ({len(batch)} files)"
+                )
 
                 # Process each file in the batch
                 for file_path in batch:
@@ -1021,7 +1371,9 @@ class WatcherDaemon:
                         error_count += 1
                         self.stats["errors"] += 1
                         self.stats["last_error"] = f"{file_path.name}: {e!s}"
-                        logger.exception(f"  [ERROR] Error ingesting {file_path.name}: {e}")
+                        logger.exception(
+                            f"  [ERROR] Error ingesting {file_path.name}: {e}"
+                        )
                         # Create alert for failed ingestion
                         self.alert_manager.alert_ingestion_failed(
                             self.db_name,
@@ -1039,13 +1391,19 @@ class WatcherDaemon:
                 self.registry.update_last_sync(self.db_name)
 
             # Log summary
-            logger.info(f"All batches complete: +{ingested_count} ingested, ~{skipped_count} duplicates skipped, x{error_count} errors")
-            logger.info(f"Session totals: {self.stats['total_ingested']} ingested, {self.stats['duplicates_skipped']} skipped, {self.stats['errors']} errors")
+            logger.info(
+                f"All batches complete: +{ingested_count} ingested, ~{skipped_count} duplicates skipped, x{error_count} errors"
+            )
+            logger.info(
+                f"Session totals: {self.stats['total_ingested']} ingested, {self.stats['duplicates_skipped']} skipped, {self.stats['errors']} errors"
+            )
 
             # Record ingestion to database_metadata.json for TUI monitor timeline
             if ingested_count > 0:
                 try:
-                    assert self.entry.source_folder is not None, "Source folder must be set"
+                    assert (
+                        self.entry.source_folder is not None
+                    ), "Source folder must be set"
                     db_metadata = DatabaseMetadata(self.entry.path)
                     db_metadata.record_ingestion(
                         folder_path=self.entry.source_folder,
@@ -1113,20 +1471,26 @@ class WatcherDaemon:
             self._release_core()
 
     async def run(self) -> None:
-        """Run the watcher daemon loop with smart detection.
+        """Run the watcher daemon with dual-queue priority architecture.
 
-        Smart detection logic:
-        1. Check if pending list exists → Resume batch mode (no scan)
-        2. If no pending list, check database document count:
-           - Count == 0 → Run discovery, then batch mode (bulk ingestion)
-           - Count > 0 → Skip to normal watch mode
-        3. After batch mode completes → Transition to normal watch mode
+        Startup logic (unchanged smart detection):
+        1. Pending list exists  → split by age, resume
+        2. Empty DB             → discover, split by age
+        3. DB has docs          → watch mode only
+
+        Dual workers (concurrent asyncio tasks):
+        - _realtime_watch_worker: detects new/modified files, ingests with full
+          pipeline (ainsert + entity extraction). Highest priority.
+        - _bulk_drain_worker: drains historical backlog with ainsert_fast
+          (embed-only, no graph). Pauses whenever realtime queue is non-empty.
+
+        Both workers share _ingest_lock (one file at a time to LightRAG).
+        Files never lost: enrichment_pending tracks fast-inserted docs for
+        future graph backfill via apipeline_process_enqueue_documents().
         """
-        # Setup signal handlers
         signal.signal(signal.SIGTERM, self._signal_handler)
         signal.signal(signal.SIGINT, self._signal_handler)
 
-        # Acquire exclusive lock on PID file (prevents duplicate daemons)
         if not self._acquire_lock():
             logger.error("Failed to start - another watcher instance is running")
             return
@@ -1137,75 +1501,78 @@ class WatcherDaemon:
         self.running = True
         logger.info(f"Watcher started for: {self.db_name}")
         logger.info(f"Watch interval: {self.entry.watch_interval}s")
+        logger.info(
+            f"Dual-queue mode: realtime (🔬full) + bulk (⚡fast, "
+            f"cutoff={self.batch_config.bulk_cutoff_days}d)"
+        )
 
         try:
-            # SMART DETECTION PHASE
+            # ── SMART DETECTION PHASE ─────────────────────────────────────────
             pending_file = self._get_pending_file_path()
+            historical: list[str] = []
 
             if pending_file.exists():
-                # Case 1: Resume batch mode (pending list exists)
-                pending_count = len(self._load_pending_files(pending_file))
-                logger.info(f"📦 Pending list detected ({pending_count} files) - resuming batch mode")
-                logger.info("   (No directory scan needed - using existing list)")
-                await self._run_batch_mode(pending_file)
-                logger.info("✓ Batch mode complete - transitioning to normal watch mode")
+                # Case 1: Resume from existing pending list
+                pending = self._load_pending_files(pending_file)
+                logger.info(
+                    f"📦 Pending list detected ({len(pending)} files) — resuming"
+                )
+                historical, recent = self._split_pending_by_age(pending)
+                for fp in recent:
+                    await self._realtime_queue.put(fp)
+                logger.info(f"   Seeded realtime queue: {len(recent)} recent files")
 
             else:
-                # No pending list - check database state
                 doc_count = await self._get_document_count()
-                logger.info(f"📊 Database status: {doc_count} documents")
+                logger.info(f"📊 Database: {doc_count} documents")
 
                 if doc_count == 0:
-                    # Case 2: Empty database - run discovery and batch mode
-                    logger.info("🔍 Empty database detected - running initial bulk ingestion")
-                    logger.info("   Step 1: Discovery (find all files)")
+                    # Case 2: Empty DB — discover and split
+                    logger.info("🔍 Empty database — initial bulk ingestion")
                     discovered = self._discover_files(pending_file)
 
                     if discovered > 0:
-                        logger.info(f"   Step 2: Batch ingestion ({discovered} files)")
-                        await self._run_batch_mode(pending_file)
-                        logger.info("✓ Initial bulk ingestion complete - transitioning to normal watch mode")
+                        pending = self._load_pending_files(pending_file)
+                        historical, recent = self._split_pending_by_age(pending)
+                        for fp in recent:
+                            await self._realtime_queue.put(fp)
+                        logger.info(
+                            f"   Seeded realtime queue: {len(recent)} recent files"
+                        )
                     else:
-                        logger.info("   No files discovered - starting normal watch mode")
+                        logger.info("   No files discovered — watch mode only")
                 else:
-                    # Case 3: Database has documents - skip to normal mode
-                    logger.info("✓ Database populated - starting normal watch mode")
+                    # Case 3: DB populated — jump straight to watch mode
+                    logger.info("✓ Database populated — starting watch mode")
 
-            # NORMAL WATCH MODE
-            # Do initial scan to establish baseline for change detection
-            logger.info(f"\n{'='*60}")
-            logger.info("NORMAL WATCH MODE - Monitoring for changes")
-            logger.info(f"{'='*60}")
-            self.detector.scan_files()
-            logger.info(f"Baseline established: {len(self.detector.known_files)} file(s) tracked")
-            logger.info(f"Checking for changes every {self.entry.watch_interval}s")
+            # ── DUAL-WORKER PHASE ─────────────────────────────────────────────
+            # bulk_drain_worker   → background, historical files, ainsert_fast
+            # realtime_watch_worker → priority, new/modified files, ainsert
+            bulk_task = asyncio.create_task(
+                self._bulk_drain_worker(historical, pending_file),
+                name="bulk_drain_worker",
+            )
+            realtime_task = asyncio.create_task(
+                self._realtime_watch_worker(),
+                name="realtime_watch_worker",
+            )
 
-            # Watch loop
-            while self.running:
-                # Detect changes since last check
-                new_files, modified_files, deleted_files = self.detector.detect_changes()
+            results = await asyncio.gather(
+                bulk_task, realtime_task, return_exceptions=True
+            )
 
-                if new_files or modified_files:
-                    total_changes = len(new_files) + len(modified_files)
-                    logger.info(f"Changes detected: +{len(new_files)} new, ~{len(modified_files)} modified, -{len(deleted_files)} deleted")
-
-                    # Batch processing for multiple changes
-                    if total_changes >= self.batch_config.batch_size:
-                        logger.info(f"📦 Multiple changes detected - using batch mode ({total_changes} files)")
-                        # Wait if system is busy
-                        await self.resource_monitor.wait_until_system_ready(logger)
-
-                    # Process changes
-                    await self._ingest_changes(new_files, modified_files)
-                else:
-                    logger.debug("No changes detected")
-
-                # Sleep until next check
-                await asyncio.sleep(self.entry.watch_interval)
+            task_names = ["bulk_drain_worker", "realtime_watch_worker"]
+            for task_name, result in zip(task_names, results):
+                if isinstance(result, Exception):
+                    logger.exception(f"Task '{task_name}' raised: {result}")
+                    self.alert_manager.alert_watcher_error(
+                        self.db_name,
+                        f"Task {task_name} failed: {result!s}",
+                        {"task": task_name},
+                    )
 
         except Exception as e:
             logger.exception(f"Watcher error: {e}")
-            # Alert on unexpected watcher crash
             self.alert_manager.alert_watcher_stopped(
                 self.db_name,
                 f"Unexpected error: {e!s}",
@@ -1213,9 +1580,8 @@ class WatcherDaemon:
             )
         finally:
             self._release_lock()
-            self._release_core()  # Release core on shutdown to free memory
+            self._release_core()
             logger.info("Watcher stopped")
-            # Alert on watcher stop (graceful or not)
             if self.stats["errors"] > 0:
                 self.alert_manager.alert_info(
                     self.db_name,
