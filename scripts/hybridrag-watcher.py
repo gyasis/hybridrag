@@ -1065,12 +1065,33 @@ class WatcherDaemon:
                     f"Changes: +{len(new_files)} new, ~{len(modified_files)} modified, "
                     f"-{len(deleted_files)} deleted"
                 )
+                # Age-gate: only route files ≤ bulk_cutoff_days old to realtime queue.
+                # Older files are already handled by the bulk drain worker (ainsert_fast).
+                # Without this, the first-poll baseline blast sends all historical files
+                # to realtime, which runs full ainsert() on files that should be fast-inserted.
+                cutoff_ts = time.time() - (self.batch_config.bulk_cutoff_days * 86400)
+                routed_realtime = 0
+                routed_skipped = 0
+                for fp in new_files | modified_files:
+                    try:
+                        is_old = fp.stat().st_mtime < cutoff_ts
+                    except OSError:
+                        is_old = False
+                    if is_old:
+                        routed_skipped += 1  # bulk drain handles it
+                    else:
+                        await self._realtime_queue.put(str(fp))
+                        routed_realtime += 1
                 if n_changes >= self.batch_config.batch_size:
                     logger.info(
-                        f"📦 Multiple changes ({n_changes}) — queued for priority processing"
+                        f"📦 Multiple changes ({n_changes}) — "
+                        f"{routed_realtime} recent→realtime, "
+                        f"{routed_skipped} old→bulk (skipped)"
                     )
-                for fp in new_files | modified_files:
-                    await self._realtime_queue.put(str(fp))
+                elif routed_realtime:
+                    logger.info(
+                        f"📦 {routed_realtime} change(s) queued for realtime processing"
+                    )
             else:
                 logger.debug("No changes detected")
 
