@@ -886,121 +886,125 @@ class WatcherDaemon:
     async def _enrichment_worker(self) -> None:
         """Lowest-priority worker: retroactively builds entity graph for fast-inserted docs.
 
-        Starts automatically AFTER _bulk_drain_worker finishes (waits on
-        _bulk_drain_complete event). Processes files from enrichment_pending
-        one at a time, yielding to the realtime worker between each file.
+        Runs CONCURRENTLY with _bulk_drain_worker — no waiting.  As soon as
+        bulk drain fast-inserts a file and appends it to enrichment_pending,
+        this worker can pick it up.
 
-        Priority order:
-            1. realtime_watch_worker  (highest — holds _llm_lock)
-            2. bulk_drain_worker      (background — already done before we start)
-            3. enrichment_worker      (this — lowest, runs only when realtime is idle)
+        Lock separation makes concurrency safe:
+          - bulk drain   holds _fast_lock  (embed only — no LLM pipeline)
+          - this worker  holds _llm_lock   (full ainsert — independent of _fast_lock)
+          - realtime     holds _llm_lock   (shares with enrichment, serialised between them)
+
+        Priority order within _llm_lock:
+            1. realtime_watch_worker  (highest — yields via _realtime_queue check)
+            2. enrichment_worker      (this — lowest, waits while realtime has work)
+
+        Poll interval: re-reads enrichment_pending every POLL_SEC seconds so that
+        files added by bulk drain mid-run are picked up without restart.
 
         Crash-safe: marks each file done immediately after success.
-        Idempotent: checks enrichment_done set + doc_status DONE before calling ainsert().
+        Idempotent: checks enrichment_done set before calling ainsert().
         """
-        logger.info("[enrichment] Worker started — waiting for bulk drain to finish...")
-        await self._bulk_drain_complete.wait()
+        POLL_SEC = 60  # re-check pending file this often when queue is empty
+
+        logger.info(
+            "[enrichment] Worker started — polling enrichment_pending concurrently with bulk drain"
+        )
 
         pending_p = self._enrichment_pending_path()
         done_p = self._enrichment_done_path()
 
-        # Load current pending and done sets
-        def _load() -> tuple[list[str], set[str]]:
-            pending: list[str] = []
-            if pending_p.exists():
-                with open(pending_p) as f:
-                    pending = [l.strip() for l in f if l.strip()]
-            done: set[str] = set()
-            if done_p.exists():
-                with open(done_p) as f:
-                    done = {l.strip() for l in f if l.strip()}
-            return pending, done
-
-        pending, done = _load()
-        # Deduplicate and subtract already-done
-        seen: set[str] = set()
-        work: list[str] = []
-        for p in pending:
-            if p not in seen and p not in done:
-                seen.add(p)
-                work.append(p)
-
-        if not work:
-            logger.info("[enrichment] No pending files — enrichment worker idle")
-            return
-
-        total = len(work)
-        logger.info(
-            f"[enrichment] Starting automatic enrichment: {total} files pending graph extraction"
-        )
-
         enriched = 0
         skipped = 0
         errors = 0
+        seen_this_run: set[str] = set()  # dedup within a run
         core = await self._get_core()
 
-        for idx, file_path_str in enumerate(work, 1):
-            if not self.running:
-                logger.info("[enrichment] Stopping on shutdown signal")
-                break
+        while self.running:
+            # ── Load pending, subtract done ─────────────────────────────────
+            raw_pending: list[str] = []
+            if pending_p.exists():
+                with open(pending_p) as f:
+                    raw_pending = [l.strip() for l in f if l.strip()]
 
-            # Yield to realtime: wait until queue is empty and lock is free
-            while not self._realtime_queue.empty() and self.running:
-                await asyncio.sleep(0.5)
+            done_set: set[str] = set()
+            if done_p.exists():
+                with open(done_p) as f:
+                    done_set = {l.strip() for l in f if l.strip()}
 
-            if not self.running:
-                break
+            work = [
+                p
+                for p in dict.fromkeys(raw_pending)
+                if p not in done_set and p not in seen_this_run
+            ]
 
-            file_path = Path(file_path_str)
-
-            # Skip missing files — mark done so they don't come back
-            if not file_path.exists():
-                logger.debug(f"[enrichment] File gone: {file_path.name}")
-                self.mark_enrichment_done(file_path_str)
-                skipped += 1
+            if not work:
+                if self._bulk_drain_complete.is_set():
+                    # Bulk drain is done AND nothing left to enrich — we're finished
+                    logger.info(
+                        "[enrichment] Queue empty and bulk drain complete — worker done"
+                    )
+                    break
+                # Bulk drain still running — wait and re-poll
+                await asyncio.sleep(POLL_SEC)
                 continue
 
-            # Skip if already fully enriched (idempotency check)
-            if file_path_str in self._enrichment_done:
-                skipped += 1
-                continue
+            logger.info(f"[enrichment] {len(work)} new file(s) to enrich")
 
-            logger.info(f"[enrichment] [{idx}/{total}] 🔬 Enriching: {file_path.name}")
+            for file_path_str in work:
+                if not self.running:
+                    break
 
-            try:
-                content = file_path.read_text(encoding="utf-8", errors="ignore")
-                if not content.strip():
+                # Yield to realtime: don't compete for _llm_lock while realtime has queued work
+                while not self._realtime_queue.empty() and self.running:
+                    await asyncio.sleep(0.5)
+
+                if not self.running:
+                    break
+
+                seen_this_run.add(file_path_str)
+                file_path = Path(file_path_str)
+
+                if not file_path.exists():
+                    logger.debug(f"[enrichment] File gone: {file_path.name}")
                     self.mark_enrichment_done(file_path_str)
                     skipped += 1
                     continue
 
-                async with self._llm_lock:
-                    success = await core.ainsert(content, str(file_path))
+                if file_path_str in self._enrichment_done:
+                    skipped += 1
+                    continue
 
-                if success:
-                    self.mark_enrichment_done(file_path_str)
-                    enriched += 1
-                    pct = (idx / total) * 100
-                    logger.info(
-                        f"[enrichment] [{idx}/{total}] ✓ Graph built ({pct:.1f}% complete)"
-                    )
-                else:
+                logger.info(f"[enrichment] 🔬 Enriching: {file_path.name}")
+
+                try:
+                    content = file_path.read_text(encoding="utf-8", errors="ignore")
+                    if not content.strip():
+                        self.mark_enrichment_done(file_path_str)
+                        skipped += 1
+                        continue
+
+                    async with self._llm_lock:
+                        success = await core.ainsert(content, str(file_path))
+
+                    if success:
+                        self.mark_enrichment_done(file_path_str)
+                        enriched += 1
+                        logger.info(
+                            f"[enrichment] ✓ Graph built: {file_path.name} (total: {enriched})"
+                        )
+                    else:
+                        errors += 1
+                        logger.error(f"[enrichment] ✗ ainsert failed: {file_path.name}")
+
+                except Exception as e:
                     errors += 1
-                    logger.error(
-                        f"[enrichment] [{idx}/{total}] ✗ ainsert failed: {file_path.name}"
-                    )
+                    logger.exception(f"[enrichment] ✗ Error: {file_path.name}: {e}")
 
-            except Exception as e:
-                errors += 1
-                logger.exception(
-                    f"[enrichment] [{idx}/{total}] ✗ Error: {file_path.name}: {e}"
-                )
+                gc.collect()
+                await asyncio.sleep(self.batch_config.bulk_worker_pause_sec)
 
-            gc.collect()
-            # Pause between files — lowest priority, no rush
-            await asyncio.sleep(self.batch_config.bulk_worker_pause_sec)
-
-        # Compact pending: remove completed paths
+        # Compact pending on exit
         if pending_p.exists():
             done_now: set[str] = set()
             if done_p.exists():
@@ -1008,11 +1012,11 @@ class WatcherDaemon:
                     done_now = {l.strip() for l in f if l.strip()}
             with open(pending_p) as f:
                 all_pending = [l.strip() for l in f if l.strip()]
-            remaining_pending = [p for p in all_pending if p not in done_now]
+            remaining = [p for p in all_pending if p not in done_now]
             with open(pending_p, "w") as f:
-                f.write("\n".join(remaining_pending))
+                f.write("\n".join(remaining))
             logger.info(
-                f"[enrichment] Compacted pending: {len(remaining_pending)} still awaiting"
+                f"[enrichment] Compacted pending: {len(remaining)} still awaiting"
             )
 
         logger.info(
