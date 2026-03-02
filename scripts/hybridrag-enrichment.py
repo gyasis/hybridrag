@@ -246,6 +246,67 @@ class EnrichmentJob:
                 if p not in done:
                     print(f"    {p}")
 
+    def print_daily_report(self) -> None:
+        """Print a cron-friendly daily progress report across all three tiers."""
+        pending = load_paths(_pending_path(self.db_name))
+        done = load_path_set(_done_path(self.db_name))
+        unique_pending = [p for p in dict.fromkeys(pending) if p not in done]
+
+        # Count docs in each storage tier from filesystem
+        db_path = Path(self.entry.path)
+        total_docs = 0
+        fully_enriched = 0
+        try:
+            full_docs_f = db_path / "kv_store_full_docs.json"
+            doc_status_f = db_path / "kv_store_doc_status.json"
+            if full_docs_f.exists():
+                import json as _json
+
+                with open(full_docs_f) as f:
+                    total_docs = sum(1 for k in _json.load(f) if k.startswith("doc-"))
+            if doc_status_f.exists():
+                import json as _json
+
+                with open(doc_status_f) as f:
+                    ds = _json.load(f)
+                fully_enriched = sum(
+                    1
+                    for k, v in ds.items()
+                    if k.startswith("doc-")
+                    and (
+                        v.get("status") == "done"
+                        if isinstance(v, dict)
+                        else str(v).lower() == "done"
+                    )
+                )
+        except Exception:
+            pass
+
+        vector_only = max(0, total_docs - fully_enriched)
+        eta_h = (len(unique_pending) * 60) / 3600  # rough: 60s/file LLM extraction
+
+        print(f"\n{'='*60}")
+        print(f"HYBRIDRAG DAILY REPORT — {self.db_name}")
+        print(f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"{'='*60}")
+        print(f"\n[TIER 1 — Bulk drain (⚡fast, vector-only)]")
+        print(f"  Total docs in storage      : {total_docs}")
+        print(f"  Vector-only (no KG yet)    : {vector_only}")
+        print(f"\n[TIER 2 — Realtime (🔬full, new/modified files)]")
+        print(f"  Fully enriched (KG+vector) : {fully_enriched}")
+        print(f"\n[TIER 3 — Enrichment (retroactive KG backfill)]")
+        print(f"  Pending enrichment         : {len(unique_pending)}")
+        print(f"  Completed enrichment       : {len(done)}")
+        if unique_pending:
+            print(f"  Est. time remaining        : {eta_h:.1f}h (at ~60s/file)")
+            print(f"  Next in queue:")
+            for p in unique_pending[:3]:
+                print(f"    {Path(p).name}")
+        print(f"\n[STATE FILES]")
+        print(f"  pending : {_pending_path(self.db_name)}")
+        print(f"  done    : {_done_path(self.db_name)}")
+        print(f"{'='*60}\n")
+
     async def run(self) -> None:
         work = self._build_work_list()
         if not work:
@@ -434,6 +495,11 @@ def main() -> None:
         action="store_true",
         help="Print enrichment queue status and exit",
     )
+    parser.add_argument(
+        "--report",
+        action="store_true",
+        help="Print daily progress report (bulk drain + enrichment) — cron-friendly",
+    )
     args = parser.parse_args()
 
     setup_logging(args.db_name)
@@ -448,6 +514,10 @@ def main() -> None:
 
         if args.status:
             job.print_status()
+            return
+
+        if args.report:
+            job.print_daily_report()
             return
 
         asyncio.run(job.run())

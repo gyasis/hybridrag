@@ -496,7 +496,12 @@ class WatcherDaemon:
         #   3. enrichment_worker      — lowest priority, ainsert() on pending list,
         #                               starts automatically after bulk drain completes
         self._realtime_queue: asyncio.Queue = asyncio.Queue()
-        self._ingest_lock: asyncio.Lock = asyncio.Lock()
+        # Two independent locks so fast-path (embed-only) never blocks LLM-path:
+        #   _fast_lock  → _bulk_drain_worker only (ainsert_fast, no LLM)
+        #   _llm_lock   → _realtime_watch_worker + _enrichment_worker (full ainsert)
+        # This lets bulk drain run concurrently with realtime entity extraction.
+        self._fast_lock: asyncio.Lock = asyncio.Lock()
+        self._llm_lock: asyncio.Lock = asyncio.Lock()
         # Event fired by bulk_drain_worker when it finishes — triggers enrichment_worker
         self._bulk_drain_complete: asyncio.Event = asyncio.Event()
 
@@ -763,7 +768,7 @@ class WatcherDaemon:
     async def _process_one_historical(self, file_path_str: str) -> None:
         """Process a single historical file with ainsert_fast (embed-only).
 
-        Must be called while holding self._ingest_lock.
+        Must be called while holding self._fast_lock.
         Tracks enrichment-pending for later graph backfill.
         """
         core = await self._get_core()
@@ -818,7 +823,7 @@ class WatcherDaemon:
         Priority logic: before each file, waits until _realtime_queue is empty.
         This guarantees realtime (new/modified) files are always processed first.
 
-        Holds _ingest_lock per-file so LightRAG is never written concurrently.
+        Holds _fast_lock per-file — independent of _llm_lock so realtime never blocks bulk.
         Saves progress every 10 files for crash recovery.
         """
         if not historical:
@@ -842,8 +847,8 @@ class WatcherDaemon:
 
             file_path_str = remaining[0]
 
-            # One file at a time under the lock so realtime can interleave between files
-            async with self._ingest_lock:
+            # Fast-path lock only — does NOT block realtime's _llm_lock
+            async with self._fast_lock:
                 await self._process_one_historical(file_path_str)
 
             remaining.pop(0)
@@ -886,7 +891,7 @@ class WatcherDaemon:
         one at a time, yielding to the realtime worker between each file.
 
         Priority order:
-            1. realtime_watch_worker  (highest — always has _ingest_lock first)
+            1. realtime_watch_worker  (highest — holds _llm_lock)
             2. bulk_drain_worker      (background — already done before we start)
             3. enrichment_worker      (this — lowest, runs only when realtime is idle)
 
@@ -969,7 +974,7 @@ class WatcherDaemon:
                     skipped += 1
                     continue
 
-                async with self._ingest_lock:
+                async with self._llm_lock:
                     success = await core.ainsert(content, str(file_path))
 
                 if success:
@@ -1021,7 +1026,7 @@ class WatcherDaemon:
         Drains _realtime_queue first (pre-seeded recent files + newly detected),
         then polls the filesystem for changes at watch_interval.
 
-        Uses _ingest_lock per-file to interleave safely with _bulk_drain_worker.
+        Uses _llm_lock per-file — does not block _bulk_drain_worker's _fast_lock.
         Graph extraction (entity/relations) runs for every file here — full pipeline.
         """
         assert self.entry is not None
@@ -1049,8 +1054,8 @@ class WatcherDaemon:
                     logger.debug(f"[realtime] File gone: {file_path.name}")
                     continue
 
-                # Lock ensures we don't overlap with bulk worker
-                async with self._ingest_lock:
+                # LLM-path lock — independent of bulk drain's _fast_lock
+                async with self._llm_lock:
                     await self._ingest_changes(
                         new_files={file_path},
                         modified_files=set(),
@@ -1649,7 +1654,8 @@ class WatcherDaemon:
         - _bulk_drain_worker: drains historical backlog with ainsert_fast
           (embed-only, no graph). Pauses whenever realtime queue is non-empty.
 
-        Both workers share _ingest_lock (one file at a time to LightRAG).
+        Workers use independent locks: bulk drain uses _fast_lock (embed-only),
+        realtime + enrichment use _llm_lock (LLM pipeline). Both run concurrently.
         Files never lost: enrichment_pending tracks fast-inserted docs for
         future graph backfill via apipeline_process_enqueue_documents().
         """

@@ -699,6 +699,52 @@ class HybridLightRAGCore:
             f"LightRAG initialized with LiteLLM (model: {self.config.model_name})"
         )
 
+    async def _drain_stale_pipeline_docs(self) -> int:
+        """Delete PROCESSING/FAILED docs from doc_status left by previous crashes.
+
+        Without this, the first ainsert() call triggers LightRAG's
+        apipeline_process_enqueue_documents() which recovers ALL interrupted
+        docs from prior runs — potentially blocking for hours.
+
+        Safe to call at startup: docs will be re-submitted naturally (by the
+        realtime worker when files change, or the enrichment worker for
+        historical files). Idempotent.
+        """
+        try:
+            from lightrag.base import DocStatus
+
+            stale: dict = {}
+            stale.update(
+                await self.rag.doc_status.get_docs_by_status(DocStatus.PROCESSING)
+            )
+            stale.update(await self.rag.doc_status.get_docs_by_status(DocStatus.FAILED))
+            if not stale:
+                return 0
+
+            logger.warning(
+                f"Startup: found {len(stale)} stale PROCESSING/FAILED docs — "
+                "deleting to prevent cascading recovery on first ainsert()"
+            )
+            await self.rag.doc_status.delete(list(stale.keys()))
+            logger.info(f"Cleared {len(stale)} stale pipeline entries")
+
+            # Also reset the busy flag in case it was left True by a crash
+            try:
+                from lightrag.kg.shared_storage import get_namespace_data
+
+                pipeline_status = await get_namespace_data("pipeline_status")
+                if pipeline_status.get("busy", False):
+                    pipeline_status["busy"] = False
+                    pipeline_status["request_pending"] = False
+                    logger.info("Reset stale pipeline busy flag")
+            except Exception:
+                pass  # Older LightRAG versions may not have get_namespace_data
+
+            return len(stale)
+        except Exception as e:
+            logger.warning(f"Could not drain stale pipeline docs (non-fatal): {e}")
+            return 0
+
     async def _ensure_initialized(self):
         """Ensure LightRAG storages are initialized (thread-safe)."""
         # Fast path: already initialized
@@ -729,6 +775,11 @@ class HybridLightRAGCore:
                     logger.info("LightRAG pipeline status initialized successfully")
                 except ImportError as e:
                     logger.warning(f"Could not import initialize_pipeline_status: {e}")
+
+            # Reset stale pipeline state from previous crashes so that the
+            # first ainsert() call does NOT trigger a cascading recovery of all
+            # interrupted docs (which would block the lock for hours).
+            await self._drain_stale_pipeline_docs()
 
             self.rag_initialized = True
             logger.info("LightRAG storages and pipeline initialized successfully")
@@ -816,13 +867,21 @@ class HybridLightRAGCore:
                 logger.info("All chunks already in storage")
                 return True
 
-            # Store without entity extraction — vector search works immediately
+            # Store without entity extraction — vector search works immediately.
+            # Do NOT call rag._insert_done() here: that flushes all 12 LightRAG
+            # storage objects including doc_status, which would contaminate the
+            # LLM pipeline state shared with the realtime worker's ainsert() calls.
+            # Instead flush only the three stores we actually wrote to.
             await asyncio.gather(
                 rag.chunks_vdb.upsert(inserting_chunks),  # embeddings → vector search
                 rag.full_docs.upsert(new_docs),  # full doc store
                 rag.text_chunks.upsert(inserting_chunks),  # chunk text store
             )
-            await rag._insert_done()
+            await asyncio.gather(
+                rag.chunks_vdb.index_done_callback(),
+                rag.full_docs.index_done_callback(),
+                rag.text_chunks.index_done_callback(),
+            )
 
             name = Path(fp).name if fp else "?"
             logger.info(
