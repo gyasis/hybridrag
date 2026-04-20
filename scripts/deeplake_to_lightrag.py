@@ -77,8 +77,8 @@ class DeepLakeToLightRAG:
         logger.info(f"Initializing LightRAG in {self.lightrag_working_dir}")
 
         # Get model names from environment (Azure preferred)
-        llm_model = os.getenv("LIGHTRAG_MODEL", "azure/gpt-5.1")
-        embed_model = os.getenv("LIGHTRAG_EMBED_MODEL", "azure/text-embedding-3-small")
+        llm_model = os.getenv("LIGHTRAG_MODEL", "openai/gpt-4.1-nano")
+        embed_model = os.getenv("LIGHTRAG_EMBED_MODEL", "openai/text-embedding-3-small")
 
         self.rag = LightRAG(
             working_dir=self.lightrag_working_dir,
@@ -391,8 +391,8 @@ class DeepLakeToLightRAG:
         print(f"📅 Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"📂 Source: {self.deeplake_path}")
         print(f"📁 Target: {self.lightrag_working_dir}")
-        llm_model = os.getenv("LIGHTRAG_MODEL", "azure/gpt-5.1")
-        embed_model = os.getenv("LIGHTRAG_EMBED_MODEL", "azure/text-embedding-3-small")
+        llm_model = os.getenv("LIGHTRAG_MODEL", "openai/gpt-4.1-nano")
+        embed_model = os.getenv("LIGHTRAG_EMBED_MODEL", "openai/text-embedding-3-small")
         print(f"🤖 Model: {llm_model} ({embed_model})")
         print(f"{'='*70}")
         
@@ -480,8 +480,8 @@ class DeepLakeToLightRAG:
                 "deeplake_source": self.deeplake_path,
                 "lightrag_target": self.lightrag_working_dir,
                 "model_config": {
-                    "llm_model": os.getenv("LIGHTRAG_MODEL", "azure/gpt-5.1"),
-                    "embedding_model": os.getenv("LIGHTRAG_EMBED_MODEL", "azure/text-embedding-3-small"),
+                    "llm_model": os.getenv("LIGHTRAG_MODEL", "openai/gpt-4.1-nano"),
+                    "embedding_model": os.getenv("LIGHTRAG_EMBED_MODEL", "openai/text-embedding-3-small"),
                     "embedding_dim": 1536
                 }
             }

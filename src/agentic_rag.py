@@ -471,7 +471,7 @@ class AgenticHybridRAG:
     def __init__(
         self,
         lightrag_core,
-        model_name: str = "azure/gpt-4.1",
+        model_name: str = "openai/gpt-4.1-nano",
         max_internal_steps: int = 8,
         verbose: bool = False
     ):
@@ -719,7 +719,7 @@ Strategy:
         )
 
 
-def create_agentic_rag(lightrag_core, model_name: str = "azure/gpt-4.1", **kwargs) -> AgenticHybridRAG:
+def create_agentic_rag(lightrag_core, model_name: str = "openai/gpt-4.1-nano", **kwargs) -> AgenticHybridRAG:
     """
     Factory function to create AgenticHybridRAG instance.
 

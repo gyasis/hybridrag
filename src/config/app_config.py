@@ -19,9 +19,9 @@ class LightRAGConfig:
     """LightRAG specific configuration."""
     working_dir: str = "./lightrag_db"
     api_key: Optional[str] = None
-    # Model names default from environment variables (Azure preferred)
-    model_name: str = field(default_factory=lambda: os.getenv("LIGHTRAG_MODEL", "azure/gpt-5.1"))
-    embedding_model: str = field(default_factory=lambda: os.getenv("LIGHTRAG_EMBED_MODEL", "azure/text-embedding-3-small"))
+    # Model names default from environment variables (OpenAI only — Azure removed 2026-04-20)
+    model_name: str = field(default_factory=lambda: os.getenv("LIGHTRAG_MODEL", "openai/gpt-4.1-nano"))
+    embedding_model: str = field(default_factory=lambda: os.getenv("LIGHTRAG_EMBED_MODEL", "openai/text-embedding-3-small"))
     # EMBEDDING_DIM is what LightRAG's PostgreSQL storage reads internally
     # LIGHTRAG_EMBEDDING_DIM is the legacy HybridRAG variable - check both for compatibility
     embedding_dim: int = field(default_factory=lambda: int(os.getenv("EMBEDDING_DIM", os.getenv("LIGHTRAG_EMBEDDING_DIM", "1536"))))
@@ -37,7 +37,7 @@ class IngestionConfig:
     """Configuration for document ingestion."""
     watch_folders: List[str] = field(default_factory=lambda: ["./data"])
     file_extensions: List[str] = field(default_factory=lambda: [
-        ".txt", ".md", ".pdf", ".json", ".py", ".js", ".html", ".csv", ".yaml", ".yml"
+        ".md"
     ])
     recursive: bool = True
     batch_size: int = 10

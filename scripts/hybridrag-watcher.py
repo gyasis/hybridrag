@@ -516,19 +516,66 @@ class WatcherDaemon:
         self._init_performance_tracker()
 
     def _load_ingested_hashes(self) -> None:
-        """Load existing document hashes from the database's doc_status store."""
+        """Load existing document hashes from authoritative doc_status source.
+
+        ECONOMY-FIRST: must seed ALL known hashes (any status) to prevent
+        re-embedding docs the backend already knows about. Reading only the
+        JSON snapshot was stale — it had 41 entries while Postgres held 561.
+        That gap caused ~520 unnecessary re-embeds worth of cost exposure.
+        """
         assert self.entry is not None, "Database entry must be loaded"
+
+        # PRIMARY: Postgres backend — read live table regardless of status
+        if getattr(self.entry, "backend_type", "json") == "postgres":
+            try:
+                import asyncio
+                import asyncpg
+
+                cfg = self.entry.backend_config or {}
+
+                async def _fetch_ids() -> list[str]:
+                    conn = await asyncpg.connect(
+                        host=cfg.get("postgres_host", "localhost"),
+                        port=int(cfg.get("postgres_port", 5432)),
+                        user=cfg.get("postgres_user", "postgres"),
+                        password=cfg.get("postgres_password", ""),
+                        database=cfg.get("postgres_database", "hybridrag"),
+                    )
+                    try:
+                        rows = await conn.fetch(
+                            "SELECT id FROM public.lightrag_doc_status "
+                            "WHERE id LIKE 'doc-%'"
+                        )
+                        return [r["id"] for r in rows]
+                    finally:
+                        await conn.close()
+
+                doc_ids = asyncio.run(_fetch_ids())
+                for doc_id in doc_ids:
+                    if doc_id.startswith("doc-"):
+                        self.ingested_hashes.add(doc_id[4:])
+                logger.info(
+                    f"[postgres] Seeded {len(self.ingested_hashes)} doc hashes from "
+                    f"public.lightrag_doc_status (all statuses — dedup authoritative)"
+                )
+                return
+            except Exception as e:
+                logger.warning(
+                    f"[postgres] Could not seed hashes from lightrag_doc_status: {e}. "
+                    f"Falling back to JSON snapshot (may be stale)."
+                )
+
+        # FALLBACK: JSON snapshot (for file-backed databases or if Postgres fails)
         doc_status_path = Path(self.entry.path) / "kv_store_doc_status.json"
         if doc_status_path.exists():
             try:
                 with open(doc_status_path) as f:
                     doc_status = json.load(f)
-                # Extract document hashes (doc-{hash} format)
                 for doc_id in doc_status:
                     if doc_id.startswith("doc-"):
                         self.ingested_hashes.add(doc_id[4:])  # Remove "doc-" prefix
                 logger.info(
-                    f"Loaded {len(self.ingested_hashes)} existing document hashes"
+                    f"[json] Loaded {len(self.ingested_hashes)} existing document hashes"
                 )
             except Exception as e:
                 logger.warning(f"Could not load doc status: {e}")

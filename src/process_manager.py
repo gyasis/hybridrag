@@ -290,7 +290,7 @@ class ProcessManager:
                             continue
                         
                         # Check file extension
-                        if file_path.suffix not in ['.txt', '.md', '.pdf', '.json', '.yaml', '.yml', '.py', '.js', '.html', '.csv']:
+                        if file_path.suffix not in ['.md']:
                             continue
                         
                         files_found += 1
@@ -380,9 +380,20 @@ class ProcessManager:
             # Initialize LightRAG in this process
             from lightrag_core import create_lightrag_core
             from ingestion_pipeline import DocumentProcessor
-            
+            from folder_watcher import FileTracker, FileInfo
+            from budget_guard import BudgetGuard, BudgetExceededError
+            from datetime import datetime
+            from pathlib import Path
+
             lightrag_core = create_lightrag_core(config)
             processor = DocumentProcessor(config)
+            tracker = FileTracker(config.ingestion.processed_files_db)
+            budget_db = str(Path(config.ingestion.processed_files_db).parent / "budget.db")
+            budget = BudgetGuard(
+                db_path=budget_db,
+                max_embeds_per_hash=int(os.environ.get("HYBRIDRAG_MAX_EMBEDS_PER_HASH", "3")),
+                max_daily_cost_usd=float(os.environ.get("HYBRIDRAG_MAX_DAILY_COST_USD", "5.0")),
+            )
             
             # Send initial status
             status_queue.put({
@@ -453,20 +464,55 @@ class ProcessManager:
                             # Process the file
                             logger.info(f"Processing: {file_info['path']}")
                             
+                            claim_info = FileInfo(
+                                path=file_info['path'],
+                                size=file_info['size'],
+                                modified_time=file_info.get('modified', 0.0),
+                                hash=file_info['hash'],
+                                extension=file_info['extension'],
+                                status='processing',
+                                ingested_at=datetime.now(),
+                            )
+                            if not tracker.claim_file_for_processing(claim_info):
+                                logger.info(f"Skipping already-claimed/processed file (dedup): {file_info['path']}")
+                                processed_count += 1
+                                continue
+
                             # Read and process content
                             content = processor.read_file(file_info['path'], file_info['extension'])
-                            
+
                             if content:
-                                # Create document with metadata
-                                from src.utils import format_file_size
-                                doc_content = f"# Document: {file_info['path']}\n"
-                                doc_content += f"# Type: {file_info['extension']}\n"
-                                doc_content += f"# Size: {format_file_size(file_info['size'])}\n\n"
-                                doc_content += content
-                                
+                                # CRITICAL: pass RAW content to LightRAG so doc-id md5
+                                # aligns with existing kv_store_doc_status.json entries.
+                                try:
+                                    import tiktoken as _tk
+                                    est_tokens = len(_tk.get_encoding("cl100k_base").encode(content))
+                                except Exception:
+                                    est_tokens = max(1, len(content) // 4)
+
+                                budget.check_and_log(
+                                    file_path=file_info['path'],
+                                    file_hash=file_info['hash'],
+                                    estimated_tokens=est_tokens,
+                                    call_type='embed',
+                                )
+
                                 # Ingest into LightRAG with source file path
-                                asyncio.run(lightrag_core.ainsert(doc_content, file_path=file_info['path']))
-                                
+                                asyncio.run(lightrag_core.ainsert(content, file_path=file_info['path']))
+
+                                try:
+                                    tracker.mark_file_processed(FileInfo(
+                                        path=file_info['path'],
+                                        size=file_info['size'],
+                                        modified_time=file_info.get('modified', 0.0),
+                                        hash=file_info['hash'],
+                                        extension=file_info['extension'],
+                                        status='processed',
+                                        ingested_at=datetime.now(),
+                                    ))
+                                except Exception as e:
+                                    logger.error(f"Error marking file processed: {e}")
+
                                 processed_count += 1
                                 logger.info(f"Successfully processed: {file_info['path']}")
                                 

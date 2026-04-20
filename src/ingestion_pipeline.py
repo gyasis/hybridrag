@@ -27,6 +27,8 @@ from bs4 import BeautifulSoup
 import csv
 import yaml
 
+from src.folder_watcher import FileTracker, FileInfo
+
 logger = logging.getLogger(__name__)
 
 
@@ -295,7 +297,17 @@ class IngestionPipeline:
         self.queue_dir = Path(config.ingestion.ingestion_queue_dir)
         self.executor = ThreadPoolExecutor(max_workers=config.system.max_concurrent_ingestions)
         self._stop_event = asyncio.Event()
-        
+
+        self.tracker = FileTracker(config.ingestion.processed_files_db)
+
+        from src.budget_guard import BudgetGuard
+        budget_db = str(Path(config.ingestion.processed_files_db).parent / "budget.db")
+        self.budget = BudgetGuard(
+            db_path=budget_db,
+            max_embeds_per_hash=int(os.environ.get("HYBRIDRAG_MAX_EMBEDS_PER_HASH", "3")),
+            max_daily_cost_usd=float(os.environ.get("HYBRIDRAG_MAX_DAILY_COST_USD", "5.0")),
+        )
+
         logger.info("IngestionPipeline initialized")
     
     def get_queued_files(self) -> List[Dict[str, Any]]:
@@ -328,7 +340,34 @@ class IngestionPipeline:
         queue_file = Path(queue_metadata['queue_file'])
         queued_file = Path(queue_metadata['queued_file'])
         original_path = queue_metadata['original_path']
-        
+
+        # Atomic claim: prevents TOCTOU between two concurrent workers that could
+        # both see "not processed" and both embed the same file.
+        try:
+            file_stat_before = os.stat(original_path) if os.path.exists(original_path) else None
+            claim_info = FileInfo(
+                path=original_path,
+                size=queue_metadata['size'],
+                modified_time=file_stat_before.st_mtime if file_stat_before else 0.0,
+                hash=queue_metadata['hash'],
+                extension=queue_metadata['extension'],
+                status='processing',
+                ingested_at=datetime.now(),
+            )
+            got_claim = self.tracker.claim_file_for_processing(claim_info)
+        except Exception as e:
+            logger.error(f"Dedup claim failed for {original_path}: {e}")
+            got_claim = True  # fail open — let LightRAG's own dedup catch it
+
+        if not got_claim:
+            logger.info(f"Skipping already-claimed/processed file (dedup): {original_path}")
+            try:
+                queue_file.unlink()
+                queued_file.unlink()
+            except Exception as e:
+                logger.error(f"Error cleaning dedup queue files: {e}")
+            return True
+
         try:
             logger.info(f"Processing file: {original_path}")
             
@@ -361,30 +400,51 @@ class IngestionPipeline:
                 return False
             
             logger.info(f"Generated {len(chunks)} chunks from {original_path}")
-            
-            # Combine chunks for ingestion (LightRAG will handle its own chunking)
-            # But we provide structured content with metadata
-            full_content = f"# Document: {original_path}\n"
-            full_content += f"# Type: {queue_metadata['extension']}\n"
-            full_content += f"# Ingested: {doc_metadata['ingested_at']}\n\n"
-            
-            for i, chunk in enumerate(chunks):
-                if i > 0:
-                    full_content += "\n\n---\n\n"
-                full_content += chunk['content']
-            
+
+            # CRITICAL: Pass RAW content to LightRAG — matches production watcher
+            # (scripts/hybridrag-watcher.py) so the doc-id = md5(content) aligns with
+            # the existing kv_store_doc_status.json entries. Adding headers (especially
+            # a timestamp) poisons the MD5 and bypasses LightRAG's native dedup.
+            payload = content
+
+            try:
+                encoding = tiktoken.get_encoding("cl100k_base")
+                estimated_tokens = len(encoding.encode(payload))
+            except Exception:
+                estimated_tokens = max(1, len(payload) // 4)
+
+            self.budget.check_and_log(
+                file_path=original_path,
+                file_hash=queue_metadata['hash'],
+                estimated_tokens=estimated_tokens,
+                call_type='embed',
+            )
+
             # Ingest into LightRAG with source file path for tracking
-            await self.lightrag.ainsert(full_content, file_path=original_path)
-            
+            await self.lightrag.ainsert(payload, file_path=original_path)
+
             logger.info(f"Successfully ingested: {original_path}")
-            
+
+            try:
+                self.tracker.mark_file_processed(FileInfo(
+                    path=original_path,
+                    size=queue_metadata['size'],
+                    modified_time=os.path.getmtime(original_path) if os.path.exists(original_path) else 0.0,
+                    hash=queue_metadata['hash'],
+                    extension=queue_metadata['extension'],
+                    status='processed',
+                    ingested_at=datetime.now(),
+                ))
+            except Exception as e:
+                logger.error(f"Error marking file processed in tracker: {e}")
+
             # Clean up queue files
             try:
                 queue_file.unlink()
                 queued_file.unlink()
             except Exception as e:
                 logger.error(f"Error cleaning up queue files: {e}")
-            
+
             return True
             
         except Exception as e:

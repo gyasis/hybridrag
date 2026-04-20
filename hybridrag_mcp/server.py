@@ -1309,7 +1309,7 @@ async def hybridrag_multihop_query(
             return f"Error: Multi-hop reasoning requires PromptChain. Install with: pip install git+https://github.com/gyasis/PromptChain.git\n\nImport error: {e}\n\n_Trace ID: {trace_id}_"
 
         # Create agentic RAG instance
-        model_name = MODEL_OVERRIDE or "azure/gpt-4o"
+        model_name = MODEL_OVERRIDE or "openai/gpt-4.1-nano"
         logger.info(
             f"Creating agentic RAG with model: {model_name}",
             extra={"category": "llm", "trace_id": trace_id}
@@ -1443,13 +1443,15 @@ def main():
     # Check transport mode from environment
     transport = os.environ.get("MCP_TRANSPORT", "stdio").lower()
     port = int(os.environ.get("MCP_PORT", "8766"))
+    host = os.environ.get("MCP_HOST", "127.0.0.1")
 
     if transport == "sse" or transport == "http":
         # SSE/HTTP transport - more robust for long-running tasks
         # Fixes stdio buffer hang issues with async operations
-        logger.info(f"Starting MCP server with SSE transport on port {port}")
+        # host=0.0.0.0 required when running inside Docker so host port-mapping works.
+        logger.info(f"Starting MCP server with SSE transport on {host}:{port}")
         logger.info("SSE transport is more robust for long-running queries")
-        mcp.run(transport="sse", port=port)
+        mcp.run(transport="sse", host=host, port=port)
     else:
         # Default stdio transport (for Claude Code subprocess mode)
         logger.info("Starting MCP server with stdio transport")

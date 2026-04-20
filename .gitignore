@@ -77,6 +77,18 @@ examples/
 
 # Runtime/local data
 ingestion_queue/*
+
+# Session memory (local runtime — not for remote)
+.memory/
+.pre-compact-discoveries.json
+
+# SpecStory local conversation exports
+.specstory/
+
+# Local state (dedup tracker + budget audit log)
+processed_files.db
+budget.db
+state/
 !ingestion_queue/.gitkeep
 # Local tool configs
 .claude/

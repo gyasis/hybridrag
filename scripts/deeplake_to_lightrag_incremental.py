@@ -80,9 +80,9 @@ class DeepLakeToLightRAGIncremental:
         """Initialize LightRAG with Azure models (via LiteLLM)."""
         logger.info(f"Initializing LightRAG in {self.lightrag_working_dir}")
 
-        # Get model names from environment (Azure preferred)
-        llm_model = os.getenv("LIGHTRAG_MODEL", "azure/gpt-5.1")
-        embed_model = os.getenv("LIGHTRAG_EMBED_MODEL", "azure/text-embedding-3-small")
+        # Get model names from environment (OpenAI only — Azure removed 2026-04-20)
+        llm_model = os.getenv("LIGHTRAG_MODEL", "openai/gpt-4.1-nano")
+        embed_model = os.getenv("LIGHTRAG_EMBED_MODEL", "openai/text-embedding-3-small")
 
         self.rag = LightRAG(
             working_dir=self.lightrag_working_dir,
@@ -361,8 +361,8 @@ class DeepLakeToLightRAGIncremental:
         print(f"📅 Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"📂 Source: {self.deeplake_path}")
         print(f"📁 Target: {self.lightrag_working_dir}")
-        llm_model = os.getenv("LIGHTRAG_MODEL", "azure/gpt-5.1")
-        embed_model = os.getenv("LIGHTRAG_EMBED_MODEL", "azure/text-embedding-3-small")
+        llm_model = os.getenv("LIGHTRAG_MODEL", "openai/gpt-4.1-nano")
+        embed_model = os.getenv("LIGHTRAG_EMBED_MODEL", "openai/text-embedding-3-small")
         print(f"🤖 Model: {llm_model} ({embed_model})")
         print(f"✨ Mode: INCREMENTAL (skips duplicates via document IDs)")
         print(f"{'='*70}")

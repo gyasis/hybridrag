@@ -92,9 +92,9 @@ class FolderToLightRAG:
         if not api_key:
             raise ValueError("AZURE_API_KEY or OPENAI_API_KEY not found in environment")
 
-        # Get model names from environment (Azure preferred)
-        llm_model = os.getenv("LIGHTRAG_MODEL", "azure/gpt-5.1")
-        embed_model = os.getenv("LIGHTRAG_EMBED_MODEL", "azure/text-embedding-3-small")
+        # Get model names from environment (OpenAI only — Azure removed 2026-04-20)
+        llm_model = os.getenv("LIGHTRAG_MODEL", "openai/gpt-4.1-nano")
+        embed_model = os.getenv("LIGHTRAG_EMBED_MODEL", "openai/text-embedding-3-small")
 
         self.rag = LightRAG(
             working_dir=self.lightrag_working_dir,

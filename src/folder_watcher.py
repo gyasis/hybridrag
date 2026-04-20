@@ -42,8 +42,16 @@ class FileTracker:
         self._init_database()
         
     def _init_database(self):
-        """Initialize SQLite database for tracking files."""
-        with sqlite3.connect(self.db_path) as conn:
+        """Initialize SQLite database for tracking files.
+
+        WAL mode + NORMAL sync + busy_timeout are the safe multi-process combo.
+        Without them, two concurrent MCP/watcher processes can both pass
+        is_file_processed() = False on the same file and both embed it (TOCTOU).
+        """
+        with sqlite3.connect(self.db_path, isolation_level=None) as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA busy_timeout=5000")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS processed_files (
                     file_path TEXT PRIMARY KEY,
@@ -62,7 +70,6 @@ class FileTracker:
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_hash ON processed_files(file_hash)
             """)
-            conn.commit()
     
     def get_file_hash(self, file_path: str, chunk_size: int = 8192) -> str:
         """Calculate SHA256 hash of file content."""
@@ -79,6 +86,7 @@ class FileTracker:
     def is_file_processed(self, file_path: str, file_hash: str) -> bool:
         """Check if file has already been processed."""
         with sqlite3.connect(self.db_path) as conn:
+            conn.execute("PRAGMA busy_timeout=5000")
             cursor = conn.execute(
                 "SELECT file_hash, status FROM processed_files WHERE file_path = ?",
                 (file_path,)
@@ -86,15 +94,60 @@ class FileTracker:
             row = cursor.fetchone()
             if row:
                 stored_hash, status = row
-                # File is considered processed if hash matches and status is processed
                 return stored_hash == file_hash and status == "processed"
             return False
-    
+
+    def claim_file_for_processing(self, file_info: FileInfo) -> bool:
+        """Atomically reserve a file for processing. Returns True if the caller
+        should proceed to embed, False if another process already claimed it
+        (status='processing') or completed it (status='processed', same hash).
+
+        This replaces the is_file_processed → paid-work → mark_file_processed
+        pattern, which is TOCTOU-unsafe across processes. Call this BEFORE the
+        paid API invocation. On embed failure, caller should flip status back
+        via mark_file_processed(status='error') or delete the row.
+        """
+        with sqlite3.connect(self.db_path, isolation_level=None) as conn:
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                cur = conn.execute(
+                    "SELECT file_hash, status FROM processed_files WHERE file_path = ?",
+                    (file_info.path,),
+                )
+                row = cur.fetchone()
+                if row:
+                    stored_hash, status = row
+                    if stored_hash == file_info.hash and status in ("processed", "processing"):
+                        conn.execute("ROLLBACK")
+                        return False
+                conn.execute("""
+                    INSERT OR REPLACE INTO processed_files
+                    (file_path, file_hash, file_size, modified_time, status, error_msg, ingested_at)
+                    VALUES (?, ?, ?, ?, 'processing', ?, ?)
+                """, (
+                    file_info.path,
+                    file_info.hash,
+                    file_info.size,
+                    file_info.modified_time,
+                    file_info.error_msg,
+                    file_info.ingested_at,
+                ))
+                conn.execute("COMMIT")
+                return True
+            except Exception:
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:
+                    pass
+                raise
+
     def mark_file_processed(self, file_info: FileInfo):
-        """Mark a file as processed."""
-        with sqlite3.connect(self.db_path) as conn:
+        """Mark a file as processed (post-embedding)."""
+        with sqlite3.connect(self.db_path, isolation_level=None) as conn:
+            conn.execute("PRAGMA busy_timeout=5000")
             conn.execute("""
-                INSERT OR REPLACE INTO processed_files 
+                INSERT OR REPLACE INTO processed_files
                 (file_path, file_hash, file_size, modified_time, status, error_msg, ingested_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (
@@ -106,7 +159,6 @@ class FileTracker:
                 file_info.error_msg,
                 file_info.ingested_at
             ))
-            conn.commit()
     
     def get_pending_files(self) -> List[str]:
         """Get list of files marked as pending or error."""

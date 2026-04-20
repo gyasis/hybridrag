@@ -131,7 +131,7 @@ class HybridRAGCLI:
                 elif db_entry.model:
                     self.llm_model = db_entry.model
                 else:
-                    self.llm_model = os.getenv("LIGHTRAG_MODEL", "azure/gpt-5.1")
+                    self.llm_model = os.getenv("LIGHTRAG_MODEL", "openai/gpt-4.1-nano")
                 # Apply API keys from registry model_config
                 if model_config and model_config.get('api_keys'):
                     for key_name, key_value in model_config['api_keys'].items():
@@ -141,11 +141,11 @@ class HybridRAGCLI:
             else:
                 # Treat as path fallback
                 self.working_dir = working_dir
-                self.llm_model = args.model if hasattr(args, 'model') and args.model else os.getenv("LIGHTRAG_MODEL", "azure/gpt-5.1")
+                self.llm_model = args.model if hasattr(args, 'model') and args.model else os.getenv("LIGHTRAG_MODEL", "openai/gpt-4.1-nano")
         else:
             self.working_dir = args.working_dir if hasattr(args, 'working_dir') else "./lightrag_db"
             # Model override support: CLI > env var > default
-            self.llm_model = args.model if hasattr(args, 'model') and args.model else os.getenv("LIGHTRAG_MODEL", "azure/gpt-5.1")
+            self.llm_model = args.model if hasattr(args, 'model') and args.model else os.getenv("LIGHTRAG_MODEL", "openai/gpt-4.1-nano")
 
             # Auto-resolve backend config from registry by path matching
             # This ensures even without --db, the correct backend is used
@@ -164,7 +164,7 @@ class HybridRAGCLI:
             except Exception as e:
                 logger.debug(f"Registry auto-resolve failed (non-fatal): {e}")
 
-        self.embed_model = args.embed_model if hasattr(args, 'embed_model') and args.embed_model else os.getenv("LIGHTRAG_EMBED_MODEL", "azure/text-embedding-3-small")
+        self.embed_model = args.embed_model if hasattr(args, 'embed_model') and args.embed_model else os.getenv("LIGHTRAG_EMBED_MODEL", "openai/text-embedding-3-small")
 
     async def run(self):
         """Execute the requested command."""

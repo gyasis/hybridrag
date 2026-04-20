@@ -45,7 +45,7 @@ async def get_embedding(texts: List[str], api_key: str, dimensions: int = 768) -
 
     try:
         response = await litellm.aembedding(
-            model=os.getenv("LIGHTRAG_EMBED_MODEL", "azure/text-embedding-3-small"),
+            model=os.getenv("LIGHTRAG_EMBED_MODEL", "openai/text-embedding-3-small"),
             input=texts,
             dimensions=dimensions,
             api_key=api_key,

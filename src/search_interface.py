@@ -35,10 +35,10 @@ from lightrag_core import QueryResult, QueryMode, ResponseType
 
 logger = logging.getLogger(__name__)
 
-# Get agentic model from environment variable, fallback to LIGHTRAG_MODEL, then Azure default
+# Get agentic model from environment variable, fallback to LIGHTRAG_MODEL, then OpenAI default
 DEFAULT_AGENTIC_MODEL = os.getenv(
     "AGENTIC_MODEL",
-    os.getenv("LIGHTRAG_MODEL", "azure/gpt-5.1")
+    os.getenv("LIGHTRAG_MODEL", "openai/gpt-4.1-nano")
 )
 
 @dataclass
