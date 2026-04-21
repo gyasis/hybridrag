@@ -192,6 +192,8 @@ class HybridRAGCLI:
             await self.run_backend_command()
         elif command == 'logs':
             await self.run_logs_command()
+        elif command == 'cost':
+            await self.run_cost_report()
         else:
             print(f"❌ Unknown command: {command}")
             return 1
@@ -2745,6 +2747,55 @@ class HybridRAGCLI:
     # Logs Management Commands
     # ========================================
 
+    async def run_cost_report(self):
+        """Per-database API spend report (ingest + query + enrichment).
+
+        Reads the shared observability SQLite (src.cost_watcher.CostWatcher)
+        and renders markdown or JSON. Supports --tail for live refresh.
+        """
+        import asyncio as _asyncio
+        import json as _json
+
+        from src.cost_watcher import CostWatcher
+
+        db_path = os.environ.get(
+            "HYBRIDRAG_BUDGET_DB",
+            str(Path.home() / ".hybridrag" / "budget.db"),
+        )
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        watcher = CostWatcher(db_path=db_path)
+
+        group_by_raw = getattr(self.args, 'group_by', 'operation') or 'operation'
+        cols = [c.strip() for c in group_by_raw.split(',') if c.strip()]
+        kwargs = {
+            "since": getattr(self.args, 'since', '24h'),
+            "db_name": getattr(self.args, 'db_name', None),
+            "group_by": cols,
+            "limit": getattr(self.args, 'limit', 50),
+        }
+
+        def _emit_once():
+            if getattr(self.args, 'as_json', False):
+                rows = watcher.report(**kwargs)
+                print(_json.dumps(rows, indent=2, default=str))
+            else:
+                print(watcher.render_markdown(**kwargs))
+
+        if getattr(self.args, 'tail', False):
+            try:
+                while True:
+                    os.system("clear" if os.name != "nt" else "cls")
+                    print(
+                        f"# hybridrag cost — live tail "
+                        f"(refreshing every 5s, Ctrl-C to stop)\n"
+                    )
+                    _emit_once()
+                    await _asyncio.sleep(5)
+            except KeyboardInterrupt:
+                print("\n[tail stopped]")
+        else:
+            _emit_once()
+
     async def run_logs_command(self):
         """Route logs management subcommands."""
         logs_cmd = getattr(self.args, 'logs_command', None)
@@ -3143,6 +3194,37 @@ Examples:
     # logs show
     logs_show = logs_subparsers.add_parser('show', help='Show log file info')
     logs_show.add_argument('name', nargs='?', help='Database name to show logs for')
+
+    # ===================== COST COMMAND =====================
+    cost_parser = subparsers.add_parser(
+        'cost',
+        help='Per-database API spend report (ingest + query + enrichment)',
+    )
+    cost_parser.add_argument(
+        '--since', default='24h',
+        help="Rolling window: '1h', '24h' (default), '7d', '4w', '1m'.",
+    )
+    cost_parser.add_argument(
+        '--db', dest='db_name', default=None,
+        help='Filter to a single registered database. Default: all.',
+    )
+    cost_parser.add_argument(
+        '--by', dest='group_by', default='operation',
+        help="Comma-separated group_by cols. Default: 'operation'. "
+             "Valid: database_name, operation, call_type, day, hour.",
+    )
+    cost_parser.add_argument(
+        '--limit', type=int, default=50,
+        help='Max result rows (default 50).',
+    )
+    cost_parser.add_argument(
+        '--tail', action='store_true',
+        help='Live tail: refresh every 5s until Ctrl-C.',
+    )
+    cost_parser.add_argument(
+        '--json', dest='as_json', action='store_true',
+        help='Emit raw JSON rows instead of markdown table.',
+    )
 
     return parser
 

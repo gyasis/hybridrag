@@ -122,6 +122,15 @@ class DatabaseEntry:
     # Model configuration (per-database, for multi-instance support)
     model_config: Optional[Dict[str, Any]] = None
 
+    # Ingestion mode (per-database safety envelope)
+    # - 'spoonfeed' : daily file quota + budget + hash cap (SpecStory-style streams)
+    # - 'batch'     : budget + hash cap, no daily quota (periodic corpus refresh)
+    # - 'oneshot'   : CLI-only, no watcher, per-run cost cap (books, papers, one-offs)
+    ingestion_mode: str = "batch"
+    spoonfeed_files_per_day: int = 10
+    max_daily_cost_usd: Optional[float] = None
+    max_run_cost_usd: Optional[float] = None
+
     def __post_init__(self):
         """Validate and normalize fields."""
         # Normalize paths to absolute (if provided)
@@ -141,6 +150,14 @@ class DatabaseEntry:
         valid_types = [t.value for t in SourceType]
         if self.source_type not in valid_types:
             raise ValueError(f"Invalid source_type '{self.source_type}'. Must be one of: {valid_types}")
+
+        # Validate ingestion_mode
+        valid_modes = {"spoonfeed", "batch", "oneshot"}
+        if self.ingestion_mode not in valid_modes:
+            raise ValueError(
+                f"Invalid ingestion_mode '{self.ingestion_mode}'. "
+                f"Must be one of: {sorted(valid_modes)}"
+            )
 
         # Set default preprocessing pipelines based on source type
         if self.preprocessing_pipeline is None:

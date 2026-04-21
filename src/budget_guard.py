@@ -70,12 +70,28 @@ class BudgetGuard:
                     file_hash TEXT,
                     token_count INTEGER,
                     cost_usd REAL,
-                    call_type TEXT
+                    call_type TEXT,
+                    database_name TEXT,
+                    operation TEXT
                 )
                 """
             )
+            # Idempotent migration for pre-existing DBs missing new columns
+            existing = {row[1] for row in conn.execute("PRAGMA table_info(calls)")}
+            if "database_name" not in existing:
+                conn.execute("ALTER TABLE calls ADD COLUMN database_name TEXT")
+            if "operation" not in existing:
+                conn.execute("ALTER TABLE calls ADD COLUMN operation TEXT")
+            # Backfill legacy rows where these columns are NULL
+            conn.execute(
+                "UPDATE calls SET database_name = 'specstory' WHERE database_name IS NULL"
+            )
+            conn.execute(
+                "UPDATE calls SET operation = call_type WHERE operation IS NULL"
+            )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_hash ON calls(file_hash)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_ts ON calls(timestamp)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_db_op ON calls(database_name, operation)")
 
     def _estimate_cost(self, call_type: str, tokens: int) -> float:
         per_m = (tokens or 0) / 1_000_000.0
@@ -93,6 +109,8 @@ class BudgetGuard:
         file_hash: str,
         estimated_tokens: int,
         call_type: str = 'embed',
+        database_name: str = 'default',
+        operation: str = 'ingest',
     ) -> None:
         """Validate a planned call. Raise BudgetExceededError to halt the pipeline.
 
@@ -135,9 +153,10 @@ class BudgetGuard:
                     )
 
                 conn.execute(
-                    "INSERT INTO calls (file_path, file_hash, token_count, cost_usd, call_type) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (file_path, file_hash, estimated_tokens, projected, call_type),
+                    "INSERT INTO calls (file_path, file_hash, token_count, cost_usd, call_type, database_name, operation) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (file_path, file_hash, estimated_tokens, projected, call_type,
+                     database_name, operation),
                 )
                 conn.execute("COMMIT")
 

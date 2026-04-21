@@ -48,6 +48,67 @@ from fastmcp import FastMCP, Context
 from src.lightrag_core import HybridLightRAGCore
 from src.config.app_config import HybridRAGConfig
 from src.database_registry import DatabaseRegistry
+from src.cost_watcher import CostWatcher, estimate_cost
+
+# ── QUERY-SIDE COST OBSERVABILITY ─────────────────────────────────────────
+# Every MCP query handler routes through the CostWatcher.record() so we can
+# attribute cost to 'operation=query' in reports. Enforcement does NOT apply
+# to queries (blocking a user's query would be worse than over-spend).
+_COST_WATCHER: Optional[CostWatcher] = None
+
+def _safety_db_path() -> str:
+    p = Path(os.environ.get(
+        "HYBRIDRAG_BUDGET_DB",
+        str(Path.home() / ".hybridrag" / "budget.db"),
+    ))
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return str(p)
+
+def _get_cost_watcher() -> CostWatcher:
+    global _COST_WATCHER
+    if _COST_WATCHER is None:
+        _COST_WATCHER = CostWatcher(db_path=_safety_db_path())
+    return _COST_WATCHER
+
+def _db_name_for_query() -> str:
+    # Prefer the registered DB name from env (set via config.yaml / docker-compose
+    # as HYBRIDRAG_DATABASE_NAME), falls back to 'default'.
+    return os.environ.get("HYBRIDRAG_DATABASE_NAME", "default")
+
+def _log_query_cost(
+    query: str,
+    result: str,
+    operation: str = "query",
+) -> None:
+    """Estimate tokens, compute cost, append to observability DB.
+    Never raises — observability failures must not surface to the user."""
+    try:
+        import tiktoken
+        enc = tiktoken.get_encoding("cl100k_base")
+        in_tokens = len(enc.encode(query or ""))
+        out_tokens = len(enc.encode(result or ""))
+    except Exception:
+        in_tokens = max(1, len(query or "") // 4)
+        out_tokens = max(1, len(result or "") // 4)
+
+    total_tokens = in_tokens + out_tokens
+    # Blended cost: embed for query + llm_out for answer (rough but useful)
+    cost_usd = (
+        estimate_cost(in_tokens, "embed")
+        + estimate_cost(in_tokens, "llm_in")
+        + estimate_cost(out_tokens, "llm_out")
+    )
+    try:
+        _get_cost_watcher().record(
+            database_name=_db_name_for_query(),
+            operation=operation,
+            file_hash=None,
+            estimated_tokens=total_tokens,
+            call_type="llm_in",
+            cost_usd=cost_usd,
+        )
+    except Exception:
+        pass  # observability never blocks
 from src.config.backend_config import BackendConfig, BackendType
 
 # Import diagnostic logging module
@@ -685,6 +746,56 @@ async def hybridrag_get_logs(
         return f"Error reading diagnostic logs: {str(e)}"
 
 
+@mcp.tool
+async def hybridrag_cost_report(
+    since: str = "24h",
+    db_name: Optional[str] = None,
+    group_by: Optional[str] = None,
+    limit: int = 50,
+) -> str:
+    """
+    [SPEED: INSTANT] [TIER: 1] [MAX_TIMEOUT: 5s]
+
+    Per-database cost observability. Reports API-spend rollups (ingestion +
+    enrichment + queries) from the shared SQLite observability log.
+
+    USE FOR:
+    - "How much did HybridRAG cost this week?"
+    - "Which operations are the biggest spenders?"
+    - "Break down today's cost by database."
+    - Budget audits after a spike.
+
+    Args:
+        since: Rolling window. Format: '<N><unit>' where unit is h/d/w/m.
+               Examples: '1h', '24h' (default), '7d', '4w', '1m'.
+        db_name: Optional filter to a single registered database
+                 (e.g., 'specstory'). None = all databases.
+        group_by: Comma-separated columns to group by. Valid columns:
+                  database_name, operation, call_type, day, hour.
+                  Default: 'operation'. Pass '' (empty) for single-row roll-up.
+        limit: Max result rows (default 50).
+
+    Returns:
+        Markdown table of calls / cost_usd / tokens per group, plus total.
+    """
+    try:
+        w = _get_cost_watcher()
+        cols: Optional[list[str]] = None
+        if group_by is not None:
+            cols = [c.strip() for c in group_by.split(",") if c.strip()]
+        return w.render_markdown(
+            since=since,
+            db_name=db_name,
+            group_by=cols,
+            limit=limit,
+        )
+    except ValueError as e:
+        return f"Invalid parameter: {e}"
+    except Exception as e:
+        logger.error(f"cost_report error: {e}", extra={"category": "error"})
+        return f"Error generating cost report: {str(e)}"
+
+
 # =============================================================================
 # TIER 2: TACTICAL TOOLS (Fast - <30s)
 # =============================================================================
@@ -782,6 +893,7 @@ async def hybridrag_local_query(
         if seeds:
             response += f"\n_Suggested multihop seeds: {seeds}_"
 
+        _log_query_cost(query, response, operation="query")
         return response
 
     except Exception as e:
@@ -856,6 +968,7 @@ async def hybridrag_extract_context(
         if was_capped:
             response += "\n_Note: top_k capped at 15 for performance._"
 
+        _log_query_cost(query, response, operation="query")
         return response
 
     except Exception as e:
@@ -967,6 +1080,7 @@ async def hybridrag_global_query(
         if ctx:
             await ctx.report_progress(100, 100, "Complete")
 
+        _log_query_cost(query, response, operation="query")
         return response
 
     except Exception as e:
@@ -1082,6 +1196,7 @@ async def hybridrag_hybrid_query(
         if ctx:
             await ctx.report_progress(100, 100, "Complete")
 
+        _log_query_cost(query, response, operation="query")
         return response
 
     except Exception as e:
@@ -1198,6 +1313,7 @@ async def hybridrag_query(
         if ctx:
             await ctx.report_progress(100, 100, "Complete")
 
+        _log_query_cost(query, response, operation="query")
         return response
 
     except Exception as e:
@@ -1398,6 +1514,7 @@ async def hybridrag_multihop_query(
         if ctx:
             await ctx.report_progress(100, 100, "Complete")
 
+        _log_query_cost(query, response, operation="query")
         return response
 
     except asyncio.CancelledError:

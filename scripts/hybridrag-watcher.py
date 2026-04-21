@@ -30,6 +30,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import Any
 
 import psutil
 
@@ -37,7 +38,9 @@ import psutil
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.alerting import get_alert_manager
+from src.budget_guard import BudgetExceededError, BudgetGuard
 from src.config.backend_config import BackendType
+from src.cost_watcher import CostWatcher
 from src.database_metadata import DatabaseMetadata
 from src.database_registry import (
     DatabaseEntry,
@@ -46,6 +49,12 @@ from src.database_registry import (
     get_watcher_pid_file,
     is_watcher_running,
     release_watcher_lock,
+)
+from src.safety import (
+    DailyQuotaExceeded,
+    ModeConfig,
+    guarded_call,
+    resolve_mode_from_env,
 )
 
 
@@ -589,6 +598,113 @@ class WatcherDaemon:
         content_hash = self._content_hash(content)
         return content_hash in self.ingested_hashes
 
+    # ── SAFETY LAYER (BudgetGuard + CostWatcher + mode) ──────────────────
+    # Lazy init so entry is already loaded and registry paths resolved.
+    def _safety_db_path(self) -> str:
+        """Path to the shared budget/observability SQLite."""
+        base = Path(os.environ.get(
+            "HYBRIDRAG_BUDGET_DB",
+            str(Path.home() / ".hybridrag" / "budget.db"),
+        ))
+        base.parent.mkdir(parents=True, exist_ok=True)
+        return str(base)
+
+    def _get_budget_guard(self) -> BudgetGuard:
+        if getattr(self, "_budget_guard", None) is None:
+            self._budget_guard = BudgetGuard(
+                db_path=self._safety_db_path(),
+                max_embeds_per_hash=int(
+                    os.environ.get("HYBRIDRAG_MAX_EMBEDS_PER_HASH", "3")
+                ),
+                max_daily_cost_usd=float(
+                    os.environ.get("HYBRIDRAG_MAX_DAILY_COST_USD", "5.0")
+                ),
+            )
+        return self._budget_guard
+
+    def _get_cost_watcher(self) -> CostWatcher:
+        if getattr(self, "_cost_watcher", None) is None:
+            self._cost_watcher = CostWatcher(db_path=self._safety_db_path())
+        return self._cost_watcher
+
+    def _get_mode(self) -> ModeConfig:
+        if getattr(self, "_mode_cached", None) is None:
+            mode_name = getattr(self.entry, "ingestion_mode", None) or "batch"
+            files_per_day = getattr(
+                self.entry, "spoonfeed_files_per_day", None
+            ) or 10
+            self._mode_cached = resolve_mode_from_env(
+                mode_name, default_files_per_day=files_per_day
+            )
+        return self._mode_cached
+
+    async def _guarded_ainsert(
+        self,
+        core: Any,
+        content: str,
+        file_path: str | Path,
+        *,
+        fast: bool = False,
+        operation: str = "ingest",
+    ) -> bool:
+        """Route an ainsert / ainsert_fast call through BudgetGuard +
+        CostWatcher + mode enforcement. Returns True on success, False if
+        the paid call was refused (quota, budget) or failed.
+
+        On DailyQuotaExceeded: logs and returns False (caller loop should
+        sleep and re-check next cycle).
+
+        On other BudgetExceededError: logs, sets shutdown signal, returns
+        False (catastrophic — halt workers).
+        """
+        # Token estimate (tiktoken) — fall back to char/4 heuristic if not
+        # available.
+        try:
+            import tiktoken
+            est_tokens = len(tiktoken.get_encoding("cl100k_base").encode(content))
+        except Exception:
+            est_tokens = max(1, len(content) // 4)
+
+        call_type = "embed" if fast else "llm_in"
+        file_hash = self._content_hash(content)
+        file_path_str = str(file_path)
+
+        async def _do_ainsert() -> bool:
+            if fast:
+                return await core.ainsert_fast(content, file_path_str)
+            return await core.ainsert(content, file_path_str)
+
+        try:
+            result = await guarded_call(
+                db_path=self._safety_db_path(),
+                database_name=self.db_name,
+                operation=operation,
+                file_hash=file_hash,
+                estimated_tokens=est_tokens,
+                call_type=call_type,
+                coroutine_factory=_do_ainsert,
+                file_path=file_path_str,
+                budget_guard=self._get_budget_guard(),
+                cost_watcher=self._get_cost_watcher(),
+                mode=self._get_mode(),
+            )
+            return bool(result)
+        except DailyQuotaExceeded as e:
+            logger.info(f"[safety] daily quota — skipping {file_path_str}: {e}")
+            return False
+        except BudgetExceededError as e:
+            logger.error(
+                f"[safety] BUDGET BREACH — halting workers: {e}"
+            )
+            # Trip the same shutdown path the 3-worker cleanup uses
+            self.running = False
+            return False
+        except Exception as e:
+            logger.error(
+                f"[safety] guarded ainsert error for {file_path_str}: {e}"
+            )
+            return False
+
     def _enrichment_pending_path(self) -> Path:
         return Path.home() / ".hybridrag" / "enrichment_pending" / f"{self.db_name}.txt"
 
@@ -836,7 +952,9 @@ class WatcherDaemon:
                 self.stats["duplicates_skipped"] += 1
                 return
 
-            success = await core.ainsert_fast(content, str(file_path))
+            success = await self._guarded_ainsert(
+                core, content, file_path, fast=True, operation="ingest"
+            )
             if success:
                 self.ingested_hashes.add(self._content_hash(content))
                 self.stats["total_ingested"] += 1
@@ -1032,7 +1150,10 @@ class WatcherDaemon:
                         continue
 
                     async with self._llm_lock:
-                        success = await core.ainsert(content, str(file_path))
+                        success = await self._guarded_ainsert(
+                            core, content, file_path,
+                            fast=False, operation="enrichment",
+                        )
 
                     if success:
                         self.mark_enrichment_done(file_path_str)
@@ -1197,10 +1318,16 @@ class WatcherDaemon:
                     is_old = False  # if can't stat, default to full mode
 
                 if is_old:
-                    success = await core.ainsert_fast(content, str(file_path))
+                    success = await self._guarded_ainsert(
+                        core, content, file_path,
+                        fast=True, operation="ingest",
+                    )
                     mode_label = "⚡fast"
                 else:
-                    success = await core.ainsert(content, str(file_path))
+                    success = await self._guarded_ainsert(
+                        core, content, file_path,
+                        fast=False, operation="ingest",
+                    )
                     mode_label = "🔬full"
 
                 if success:
@@ -1576,8 +1703,11 @@ class WatcherDaemon:
                             self.stats["duplicates_skipped"] += 1
                             continue
 
-                        # Ingest the file
-                        success = await core.ainsert(content, str(file_path))
+                        # Ingest the file (guarded: budget + mode + observability)
+                        success = await self._guarded_ainsert(
+                            core, content, file_path,
+                            fast=False, operation="ingest",
+                        )
                         if success:
                             self.ingested_hashes.add(content_hash)
                             ingested_count += 1
