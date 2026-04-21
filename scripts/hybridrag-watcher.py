@@ -697,44 +697,55 @@ class WatcherDaemon:
             logger.info(f"[safety] daily quota — skipping {file_path_str}: {e}")
             return False
         except BudgetExceededError as e:
-            # Try Ollama-spillover if configured for this DB.
+            # Try Ollama-spillover tiers in order; first success wins.
             trigger = getattr(self.entry, "fallback_trigger", "never")
-            has_fallback = bool(getattr(self.entry, "fallback_llm_model", None))
-            if has_fallback and trigger in ("on_budget_exceeded", "always"):
+            tiers = self._get_fallback_tier_list()
+            if tiers and trigger in ("on_budget_exceeded", "always"):
                 logger.warning(
-                    f"[safety] Budget breach — spillover to "
-                    f"{self.entry.fallback_llm_model}: {e}"
+                    f"[safety] Budget breach — spillover over {len(tiers)} "
+                    f"tier(s): {tiers}. Primary error: {e}"
                 )
-                try:
-                    fb_core = await self._get_fallback_core()
-                    if fb_core is None:
-                        raise RuntimeError("fallback core not available")
-                    if fast:
-                        ok = await fb_core.ainsert_fast(content, file_path_str)
-                    else:
-                        ok = await fb_core.ainsert(content, file_path_str)
-                    # Log the saved-by-fallback call as free (cost=0) with
-                    # a distinct operation tag so reports show local spend.
-                    self._get_cost_watcher().record(
-                        database_name=self.db_name,
-                        operation=f"{operation}_local",
-                        file_hash=file_hash,
-                        estimated_tokens=est_tokens,
-                        call_type="llm_local",
-                        file_path=file_path_str,
-                        cost_usd=0.0,
-                    )
-                    if ok:
-                        logger.info(
-                            f"[fallback] ✓ Ollama spillover succeeded for {file_path_str}"
+                for tier_idx, model_tag in enumerate(tiers):
+                    try:
+                        fb_core = await self._get_fallback_core(tier_idx)
+                        if fb_core is None:
+                            continue
+                        if fast:
+                            ok = await fb_core.ainsert_fast(content, file_path_str)
+                        else:
+                            ok = await fb_core.ainsert(content, file_path_str)
+                        if ok:
+                            # Distinct op tag per tier so cost reports show
+                            # which tier drained the work.
+                            short_tag = model_tag.split("/")[-1].replace(":", "_")
+                            self._get_cost_watcher().record(
+                                database_name=self.db_name,
+                                operation=f"{operation}_local_t{tier_idx + 1}_{short_tag}",
+                                file_hash=file_hash,
+                                estimated_tokens=est_tokens,
+                                call_type="llm_local",
+                                file_path=file_path_str,
+                                cost_usd=0.0,
+                            )
+                            logger.info(
+                                f"[fallback] ✓ tier-{tier_idx + 1} ({model_tag}) "
+                                f"succeeded for {file_path_str}"
+                            )
+                            return True
+                        logger.warning(
+                            f"[fallback] tier-{tier_idx + 1} ({model_tag}) "
+                            f"returned False — trying next tier"
                         )
-                    return bool(ok)
-                except Exception as fe:
-                    logger.error(
-                        f"[fallback] Ollama spillover FAILED — halting: {fe}"
-                    )
-                    self.running = False
-                    return False
+                    except Exception as fe:
+                        logger.warning(
+                            f"[fallback] tier-{tier_idx + 1} ({model_tag}) "
+                            f"errored: {str(fe)[:140]} — trying next tier"
+                        )
+                logger.error(
+                    f"[fallback] ALL tiers exhausted for {file_path_str} — halting"
+                )
+                self.running = False
+                return False
             # No fallback configured — catastrophic halt.
             logger.error(f"[safety] BUDGET BREACH — halting workers: {e}")
             self.running = False
@@ -1597,42 +1608,54 @@ class WatcherDaemon:
             self._config = None
             gc.collect()
 
-    async def _get_fallback_core(self):
-        """Lazy-init a SECOND LightRAG core configured with the Ollama
-        fallback model. Writes to the same Postgres backend — just swaps the
-        LLM provider. Only called after primary budget breach.
+    def _get_fallback_tier_list(self) -> list[str]:
+        """Unified ordered list of fallback model tags.
 
-        num_ctx injection is handled inside lightrag_core.py when the model
-        name starts with 'ollama/', driven by HYBRIDRAG_OLLAMA_NUM_CTX env.
+        Prefers the explicit `fallback_tiers` list; falls back to the single
+        `fallback_llm_model` (backward compat). Empty → no spillover.
         """
         assert self.entry is not None
-        if not getattr(self.entry, "fallback_llm_model", None):
-            return None
+        tiers = getattr(self.entry, "fallback_tiers", None)
+        if tiers:
+            return [t for t in tiers if t]
+        single = getattr(self.entry, "fallback_llm_model", None)
+        return [single] if single else []
 
-        if self._fallback_core is None:
+    async def _get_fallback_core(self, tier_idx: int = 0):
+        """Lazy-init the Nth fallback LightRAG core. Writes to same Postgres
+        backend as primary — only the LLM provider differs. Multiple tiers
+        are kept in a dict so each is loaded on first use and reused.
+        """
+        assert self.entry is not None
+        tiers = self._get_fallback_tier_list()
+        if tier_idx >= len(tiers):
+            return None
+        model_tag = tiers[tier_idx]
+
+        if not hasattr(self, "_fallback_cores"):
+            self._fallback_cores: dict[int, Any] = {}
+
+        if tier_idx not in self._fallback_cores:
             from src.config.app_config import HybridRAGConfig
             from src.lightrag_core import HybridLightRAGCore
 
             logger.info(
-                f"[fallback] Initializing Ollama fallback core: "
-                f"{self.entry.fallback_llm_model} (num_ctx={self.entry.fallback_llm_num_ctx})"
+                f"[fallback] Initializing tier-{tier_idx + 1} Ollama core: "
+                f"{model_tag} (num_ctx={self.entry.fallback_llm_num_ctx})"
             )
-
-            # Side-channel config so lightrag_core's num_ctx injector can pick it up
             os.environ["HYBRIDRAG_OLLAMA_NUM_CTX"] = str(self.entry.fallback_llm_num_ctx)
             os.environ["OLLAMA_API_BASE"] = self.entry.fallback_llm_api_base
 
             cfg = HybridRAGConfig()
             cfg.lightrag.working_dir = self.entry.path
-            cfg.lightrag.model_name = self.entry.fallback_llm_model
+            cfg.lightrag.model_name = model_tag
 
             backend_config = self.entry.get_backend_config()
-            self._fallback_core = HybridLightRAGCore(
-                cfg, backend_config=backend_config
-            )
-            await self._fallback_core._ensure_initialized()
-            logger.info("[fallback] Ollama fallback core ready")
-        return self._fallback_core
+            core = HybridLightRAGCore(cfg, backend_config=backend_config)
+            await core._ensure_initialized()
+            self._fallback_cores[tier_idx] = core
+            logger.info(f"[fallback] tier-{tier_idx + 1} ready: {model_tag}")
+        return self._fallback_cores[tier_idx]
 
     def _check_json_file_sizes(self) -> None:
         """Check JSON storage file sizes against thresholds.

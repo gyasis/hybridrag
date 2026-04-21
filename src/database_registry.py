@@ -131,12 +131,17 @@ class DatabaseEntry:
     max_daily_cost_usd: Optional[float] = None
     max_run_cost_usd: Optional[float] = None
 
-    # Local-LLM spillover (per-DB). When primary LLM hits budget or is
-    # explicitly configured to always route locally, fall back to an Ollama
-    # model for entity/relation extraction. Free-to-run (electricity only),
-    # slower, ~85-90% the quality of gpt-4.1-nano for structured output.
-    # Empty/None = no fallback (primary-only).
+    # Local-LLM spillover (per-DB). When primary LLM hits budget, the
+    # watcher retries the ainsert through a sequence of Ollama fallbacks
+    # (cheap electricity, slower, ~85-95% the quality of gpt-4.1-nano).
+    #
+    # Two ways to configure, per-machine / per-DB:
+    #   1. fallback_llm_model: single model — backward-compat, equivalent
+    #      to a 1-entry fallback_tiers.
+    #   2. fallback_tiers: ordered list of model tags tried top-down until
+    #      one succeeds. Wins over fallback_llm_model when set.
     fallback_llm_model: Optional[str] = None          # e.g., "ollama/qwen3-coder:30b"
+    fallback_tiers: Optional[List[str]] = None        # e.g., ["ollama/gpt-oss:20b", "ollama/qwen3-coder:30b"]
     fallback_llm_api_base: str = "http://localhost:11434"
     fallback_llm_num_ctx: int = 32768                 # per research: Ollama default (2k-8k) silently truncates LightRAG prompts
     fallback_trigger: str = "on_budget_exceeded"      # 'on_budget_exceeded' | 'always' | 'never'
