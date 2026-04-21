@@ -504,6 +504,14 @@ class HybridLightRAGCore:
             "tools",
             "tool_choice",
             "timeout",
+            # Ollama-specific — LiteLLM forwards to /api/chat options:
+            "num_ctx",
+            "num_predict",
+            "repeat_last_n",
+            "repeat_penalty",
+            "mirostat",
+            "mirostat_tau",
+            "mirostat_eta",
         }
 
         # LLM model function using LiteLLM for provider-agnostic access
@@ -569,6 +577,20 @@ class HybridLightRAGCore:
             if self.is_azure and self.azure_api_base:
                 litellm_kwargs["api_base"] = self.azure_api_base
                 litellm_kwargs["api_version"] = self.azure_api_version
+
+            # Ollama-specific: inject num_ctx to prevent silent truncation of
+            # LightRAG's extraction prompts (>4k tokens). Research 2026-04-21:
+            # Ollama default num_ctx is 2048/8192; LightRAG prompts routinely
+            # exceed this, producing `0 nodes, 0 edges`.
+            if self.config.model_name.startswith("ollama/"):
+                litellm_kwargs.setdefault(
+                    "num_ctx",
+                    int(os.environ.get("HYBRIDRAG_OLLAMA_NUM_CTX", "32768")),
+                )
+                # Allow per-call override of api_base for non-localhost Ollama
+                ollama_api_base = os.environ.get("OLLAMA_API_BASE")
+                if ollama_api_base:
+                    litellm_kwargs.setdefault("api_base", ollama_api_base)
 
             # Inner function for retry wrapper
             async def _do_completion():

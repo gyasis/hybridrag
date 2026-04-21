@@ -131,6 +131,16 @@ class DatabaseEntry:
     max_daily_cost_usd: Optional[float] = None
     max_run_cost_usd: Optional[float] = None
 
+    # Local-LLM spillover (per-DB). When primary LLM hits budget or is
+    # explicitly configured to always route locally, fall back to an Ollama
+    # model for entity/relation extraction. Free-to-run (electricity only),
+    # slower, ~85-90% the quality of gpt-4.1-nano for structured output.
+    # Empty/None = no fallback (primary-only).
+    fallback_llm_model: Optional[str] = None          # e.g., "ollama/qwen3-coder:30b"
+    fallback_llm_api_base: str = "http://localhost:11434"
+    fallback_llm_num_ctx: int = 32768                 # per research: Ollama default (2k-8k) silently truncates LightRAG prompts
+    fallback_trigger: str = "on_budget_exceeded"      # 'on_budget_exceeded' | 'always' | 'never'
+
     def __post_init__(self):
         """Validate and normalize fields."""
         # Normalize paths to absolute (if provided)
@@ -157,6 +167,14 @@ class DatabaseEntry:
             raise ValueError(
                 f"Invalid ingestion_mode '{self.ingestion_mode}'. "
                 f"Must be one of: {sorted(valid_modes)}"
+            )
+
+        # Validate fallback_trigger
+        valid_triggers = {"on_budget_exceeded", "always", "never"}
+        if self.fallback_trigger not in valid_triggers:
+            raise ValueError(
+                f"Invalid fallback_trigger '{self.fallback_trigger}'. "
+                f"Must be one of: {sorted(valid_triggers)}"
             )
 
         # Set default preprocessing pipelines based on source type

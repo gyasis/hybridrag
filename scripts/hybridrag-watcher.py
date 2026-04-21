@@ -491,6 +491,10 @@ class WatcherDaemon:
         self._core = None
         self._config = None
 
+        # Optional Ollama-spillover LightRAG core. Lazy-initialized only when
+        # budget is breached and entry.fallback_llm_model is configured.
+        self._fallback_core = None
+
         # Performance tracker for proactive monitoring (T012-T013)
         # Threshold is loaded from backend_config after entry is loaded
         self.performance_tracker: PerformanceTracker | None = None
@@ -693,10 +697,46 @@ class WatcherDaemon:
             logger.info(f"[safety] daily quota — skipping {file_path_str}: {e}")
             return False
         except BudgetExceededError as e:
-            logger.error(
-                f"[safety] BUDGET BREACH — halting workers: {e}"
-            )
-            # Trip the same shutdown path the 3-worker cleanup uses
+            # Try Ollama-spillover if configured for this DB.
+            trigger = getattr(self.entry, "fallback_trigger", "never")
+            has_fallback = bool(getattr(self.entry, "fallback_llm_model", None))
+            if has_fallback and trigger in ("on_budget_exceeded", "always"):
+                logger.warning(
+                    f"[safety] Budget breach — spillover to "
+                    f"{self.entry.fallback_llm_model}: {e}"
+                )
+                try:
+                    fb_core = await self._get_fallback_core()
+                    if fb_core is None:
+                        raise RuntimeError("fallback core not available")
+                    if fast:
+                        ok = await fb_core.ainsert_fast(content, file_path_str)
+                    else:
+                        ok = await fb_core.ainsert(content, file_path_str)
+                    # Log the saved-by-fallback call as free (cost=0) with
+                    # a distinct operation tag so reports show local spend.
+                    self._get_cost_watcher().record(
+                        database_name=self.db_name,
+                        operation=f"{operation}_local",
+                        file_hash=file_hash,
+                        estimated_tokens=est_tokens,
+                        call_type="llm_local",
+                        file_path=file_path_str,
+                        cost_usd=0.0,
+                    )
+                    if ok:
+                        logger.info(
+                            f"[fallback] ✓ Ollama spillover succeeded for {file_path_str}"
+                        )
+                    return bool(ok)
+                except Exception as fe:
+                    logger.error(
+                        f"[fallback] Ollama spillover FAILED — halting: {fe}"
+                    )
+                    self.running = False
+                    return False
+            # No fallback configured — catastrophic halt.
+            logger.error(f"[safety] BUDGET BREACH — halting workers: {e}")
             self.running = False
             return False
         except Exception as e:
@@ -1556,6 +1596,43 @@ class WatcherDaemon:
             self._core = None
             self._config = None
             gc.collect()
+
+    async def _get_fallback_core(self):
+        """Lazy-init a SECOND LightRAG core configured with the Ollama
+        fallback model. Writes to the same Postgres backend — just swaps the
+        LLM provider. Only called after primary budget breach.
+
+        num_ctx injection is handled inside lightrag_core.py when the model
+        name starts with 'ollama/', driven by HYBRIDRAG_OLLAMA_NUM_CTX env.
+        """
+        assert self.entry is not None
+        if not getattr(self.entry, "fallback_llm_model", None):
+            return None
+
+        if self._fallback_core is None:
+            from src.config.app_config import HybridRAGConfig
+            from src.lightrag_core import HybridLightRAGCore
+
+            logger.info(
+                f"[fallback] Initializing Ollama fallback core: "
+                f"{self.entry.fallback_llm_model} (num_ctx={self.entry.fallback_llm_num_ctx})"
+            )
+
+            # Side-channel config so lightrag_core's num_ctx injector can pick it up
+            os.environ["HYBRIDRAG_OLLAMA_NUM_CTX"] = str(self.entry.fallback_llm_num_ctx)
+            os.environ["OLLAMA_API_BASE"] = self.entry.fallback_llm_api_base
+
+            cfg = HybridRAGConfig()
+            cfg.lightrag.working_dir = self.entry.path
+            cfg.lightrag.model_name = self.entry.fallback_llm_model
+
+            backend_config = self.entry.get_backend_config()
+            self._fallback_core = HybridLightRAGCore(
+                cfg, backend_config=backend_config
+            )
+            await self._fallback_core._ensure_initialized()
+            logger.info("[fallback] Ollama fallback core ready")
+        return self._fallback_core
 
     def _check_json_file_sizes(self) -> None:
         """Check JSON storage file sizes against thresholds.
